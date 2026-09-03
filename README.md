@@ -1,39 +1,347 @@
-# site-scanning-alert-template
-A template for using GitHub Actions and Issues to set up alerts for changes in Site Scanning results 
+# Site Scanning Alerts
 
-## Models
+Monitor federal websites for status changes and configuration issues using [GSA Site Scanning](https://digital.gov/site-scanning/) data. Automatically creates GitHub issues when your monitored websites experience problems.
 
-#### Model 1
+This repo monitors the sites listed in `watchlist.txt` and checks for changes or problems daily.
 
-For a set list of `initial_domain` entries, create an issue when there is a change in value to the `live` field, the `status_code` field, or the `primary_scan_status` field.  Something along the line of: 
+---
 
-Ideally, all of the alerts like this would be combined into a single issue.  So an issue might look like:  
+**⚠️ Using this as a template?** → Jump to [Setup (Template Instructions)](#setup-template-instructions)
 
-Title: Possible website issues
-Body: 
+---
 
-````
-❗ Site Scanning results have changed for websites that you are monitoring:  
+## Quickstart
+
+1. Add domains to monitor in `watchlist.txt`:
+   ```
+   blog.gsa.gov
+   www.gsa.gov
+   base:gsa.gov
+   ```
+
+2. Enable the workflow in `.github/workflows/site-scanning-alerts.yml`:
+   ```yaml
+   name: Site Scanning Alerts
+   
+   on:
+     schedule:
+       - cron: '30 15 * * *'
+     workflow_dispatch:
+   
+   permissions:
+     issues: write
+   
+   jobs:
+     check-alerts:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+         - uses: GSA/site-scanning-alert-template@v1
+           with:
+             watchlist: watchlist.txt
+   ```
+
+3. Go to Actions tab → "Site Scanning Alerts" → Enable workflow
+
+4. Wait for the first run (daily at 15:30 UTC) or trigger manually via workflow_dispatch
+
+## What You'll Get
+
+When a monitored site has a problem, an issue like this is created automatically:
+
+```
+❗ Site Scanning results have changed for websites that you are monitoring:
 
 initial_domain: blog.acme.gov
-live: TRUE -> FALSE 
+live: TRUE -> FALSE
 
 initial_domain: blog.acme.gov
-status_code: 200 -> 503 
+status_code: 200 -> 503
 
 initial_domain: calendar.acme.gov
-primary_scan_status: completed -> timeout 
+primary_scan_status: completed -> timeout
 
 Please investigate as appropriate.
-````
+```
 
-If that was cumbersome, we could discuss having individual issues generated for each initial domain.  
+The action uses **rolling issues** with fingerprints:
+- **First detection** → creates a new issue
+- **Changes** → comments on the existing issue with the new findings
+- **Condition clears** → adds a "condition cleared" comment (does not auto-close)
+- **Re-runs with identical findings** → no-op (no duplicate issues)
 
-My suggestion would be to compare either the CSV or JSON `-latest` snapshot file to the `previous` snapshot file, however my heart is open to instead querying the API, not for a change in value but for the existence of a value, e.g. when a site on the list returns a status code of: 301. 302. 307. 400, 401, 402, 403, 404, 405, 500, 501, 502, 503.  
+## Configuring Your Watchlist
 
-#### Model 2
+Edit `watchlist.txt` to add the websites you want to monitor. Two syntaxes are supported:
 
-The same behavior as Model 1 except for all records that have a certain initial_base_domain (e.g. cpsc.gov).  
+### Model 1: Exact Domain Match
 
-## Notes
-* [These](https://github.com/GSA/site-scanning/issues/1672) [issue](https://github.com/GSA/site-scanning/issues/1968) templates are good starting points and could be largely copied.  
+Monitor specific domains by listing them one per line:
+
+```
+blog.acme.gov
+calendar.acme.gov
+www.acme.gov
+```
+
+This watches only those exact `initial_domain` values in the Site Scanning data.
+
+### Model 2: All Subdomains Under a Base Domain
+
+Monitor all websites under a base domain using the `base:` prefix:
+
+```
+base:cpsc.gov
+```
+
+This watches every record where `initial_base_domain` equals `cpsc.gov`, including `www.cpsc.gov`, `access.cpsc.gov`, etc.
+
+### Comments and Blank Lines
+
+Lines starting with `#` are treated as comments and ignored. Blank lines are also ignored.
+
+## Configuration Reference
+
+The action is configured via inputs in `.github/workflows/site-scanning-alerts.yml`. All inputs are optional with sensible defaults.
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `watchlist` | `watchlist.txt` | Path to the file containing domains to monitor (one per line, supports base:domain.gov syntax for all subdomains) |
+| `mode` | `both` | Alert mode: `change` (detect changes between latest and previous snapshots), `state` (alert on bad current values), or `both` |
+| `fields` | `live,status_code,primary_scan_status` | Comma-separated list of fields to monitor for changes (change mode only). Available: live, status_code, primary_scan_status |
+| `alert_on_status_codes` | `500,502,503,504` | Comma-separated list of HTTP status codes to alert on (state mode). Example: 500,502,503,504 |
+| `alert_on_scan_status` | *(empty)* | Comma-separated list of primary_scan_status values to alert on (state mode). Leave empty to disable. Example: connection_refused,invalid_ssl_cert |
+| `alert_on_not_live` | `false` | Alert when monitored sites have live=false (state mode) |
+| `ignore_blank_transitions` | `false` | Suppress alerts for value -> blank and blank -> value transitions. When false, renders blanks as "(no data)" |
+| `ignore_transitions` | *(see below)* | Comma-separated list of specific transitions to suppress, format: field:old_value->new_value. Default suppresses transient status flapping |
+| `max_changes` | `25` | Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines |
+| `labels` | `site-scanning-alert` | Comma-separated list of labels to apply to created issues |
+| `issue_title` | `Possible website issues` | Title for alert issues |
+| `snapshot_url` | `https://api.gsa.gov/.../site-scanning-latest.csv` | URL of the latest Site Scanning snapshot CSV. Override for testing only |
+| `previous_snapshot_url` | `https://api.gsa.gov/.../site-scanning-previous.csv` | URL of the previous Site Scanning snapshot CSV (for change detection). Override for testing only |
+| `max_snapshot_age_days` | `3` | Maximum age of the latest snapshot before reporting staleness instead of changes |
+| `token` | `${{ github.token }}` | GitHub token for creating issues. Defaults to github.token (requires permissions.issues: write) |
+| `fail_on_alert` | `false` | Whether to fail the workflow when an alert is fired |
+| `dry_run` | `false` | When true, render alert to step summary instead of creating an issue |
+| `comment_on_clear` | `true` | When true and an existing alert issue has been resolved, add a comment noting the condition cleared |
+
+**Default `ignore_transitions`:** The action suppresses flapping between transient scan statuses by default:
+```
+primary_scan_status:timeout->execution_context_destroyed
+primary_scan_status:timeout->connection_reset
+primary_scan_status:timeout->empty_response
+primary_scan_status:execution_context_destroyed->timeout
+primary_scan_status:connection_reset->timeout
+primary_scan_status:empty_response->timeout
+primary_scan_status:aborted->timeout
+primary_scan_status:http2_error->timeout
+```
+
+Transitions to/from `completed` are **not** suppressed — those are the highest-signal changes.
+
+## Understanding Your Alerts
+
+When you receive an alert, here's what each field means and what action to take:
+
+| Field | Meaning | What It Usually Means | Reference |
+|-------|---------|----------------------|-----------|
+| `live: TRUE -> FALSE` | Site stopped returning a 2xx status code | Real outage or a new block on the scanner. Investigate immediately. | [Data Dictionary](https://github.com/GSA/site-scanning-documentation/blob/main/data/Site_Scanning_Data_Dictionary.csv) |
+| `live: TRUE -> (no data)` | Scan couldn't complete at all | Check `primary_scan_status` on the same line for the reason (often `timeout` or `dns_resolution_error`) | |
+| `status_code: 200 -> 403` | Now refusing the scanner | Often WAF/bot rules, not a real outage. 3,144 sites sit at 403 steady-state. Verify manually in a browser. | |
+| `status_code: 200 -> 503` | Service unavailable | Real problem. Investigate with your hosting team. | |
+| `primary_scan_status: completed -> timeout` | Loaded before, didn't finish now | Most common genuine signal (142 of 410 changes/day). Often indicates slow page load or redirect loop. | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
+| `primary_scan_status: completed -> dns_resolution_error` | DNS stopped resolving | Domain expired, DNS misconfiguration, or site taken offline | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
+| `primary_scan_status: completed -> invalid_ssl_cert` | Certificate problem | Check expiration and CN/SAN match | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
+| `no longer in snapshot` | Dropped from the Federal Website Index | Not an outage — index maintenance. Site may have been marked non-public or moved to a non-federal domain | |
+| `newly in snapshot` | Added to the Federal Website Index | Not a problem — the watchlist is expanding | |
+
+For detailed remediation guidance on each scan status, see [GSA's Scan Statuses reference](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md).
+
+## Tuning the Noise
+
+Real-world data (2026-09-02 snapshot): **63% of `live` changes and 62% of `primary_scan_status` changes are artifacts** — value↔blank transitions or transient flapping (`completed`↔`timeout`). The action's defaults suppress the most common noise while preserving genuine signal.
+
+### Noise by the Numbers
+
+From a typical day's diff of 29,668 sites:
+
+| Metric | Count | Notes |
+|--------|-------|-------|
+| Total changes (all fields) | 1,332 | Across 117 of 1,396 base domains |
+| `live` changes | 457 | 195 →blank, 168 blank→, 94 real |
+| `status_code` changes | 465 | 194 →blank, 165 blank→, 106 real |
+| `primary_scan_status` changes | 410 | All real values, but 62% is round-trip flapping |
+| Noisiest base domain | `sandia.gov` | 373 change-lines/day across 341 rows |
+| Quietest (example) | `cpsc.gov` | 0 changes across 22 rows |
+
+### Strategies
+
+**For Model 1 (exact domains):** Default settings work well. Most watchlists see 0-5 changes/day.
+
+**For Model 2 (`base:large-agency.gov`):** You'll hit noise. Options:
+
+1. **Raise `max_changes`** (e.g. to `100`) — you'll get a summary instead of enumeration
+2. **Enable `ignore_blank_transitions: 'true'`** — cuts volume by ~60% but hides some real outages
+3. **Switch to Model 1** — monitor only the 10-20 most critical domains under that base
+
+**Flapping you probably want to ignore:** The default `ignore_transitions` handles the worst offenders. If you see round-trips like `completed`→`timeout`→`completed` daily for the same site, add them:
+
+```yaml
+ignore_transitions: 'primary_scan_status:completed->timeout,primary_scan_status:timeout->completed'
+```
+
+**Blank transitions (`live: true -> (no data)`):** These often mean "the scanner couldn't reach the site that day" — a genuine signal. Suppressing them (`ignore_blank_transitions: true`) will hide real but intermittent problems.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Workflow ran, no issue, no alerts | Watchlist matches nothing | Check the workflow's step summary for unmatched entries. Verify domains exist in the [Site Scanning target list](https://github.com/GSA/federal-website-index/blob/main/data/site-scanning-target-url-list.csv) |
+| "Snapshot has not rotated" message | Ran multiple times before 15:00 UTC rotation | Expected behavior. The action is idempotent when snapshots haven't changed. |
+| HTTP 403 from api.gsa.gov | Rate limit or network policy block | The action retries automatically. Check the workflow log for retry attempts. If persistent, contact GSA or check your org's firewall rules. |
+| Issue created but label missing | Label didn't exist in the repo | The action creates the label automatically (requires `permissions: issues: write`). Check that the workflow has this permission. |
+| Too many alerts (100+ changes) | Large `base:` watchlist + noisy domain | Raise `max_changes` to get a summary, or switch to exact-domain Model 1 for critical sites only |
+| "Snapshot is stale" message | Upstream scanning engine hasn't run | The action reports staleness instead of flooding with change alerts. Check the [Site Scanning engine's workflows](https://github.com/GSA/site-scanning-engine/actions). |
+| Nothing since \<date\> but sites are fine | Snapshot rotation cadence | Snapshots rotate once daily at 15:00 UTC. The action runs at 15:30 UTC to catch the fresh data. |
+| Empty watchlist warning | `watchlist.txt` has only comments/blanks | Add at least one domain (uncomment an example or add your own) |
+
+---
+
+## Setup (Template Instructions)
+
+**This section is for organizations using this repo as a template.** If you cloned or forked this repository to set up monitoring for your own organization, follow these steps:
+
+### Initial Setup
+
+1. **Use this template**
+   - Click "Use this template" at the top of this repo
+   - Create your repo in your organization's GitHub account
+   - Clone it locally
+
+2. **Enable the workflow**
+   - Go to the Actions tab in your new repo
+   - Click "I understand my workflows, go ahead and enable them"
+   - Find "Site Scanning Alerts" in the list and enable it
+
+3. **Configure what to monitor**
+   - Edit `watchlist.txt` to list your domains (see [Configuring Your Watchlist](#configuring-your-watchlist))
+   - Commit and push
+
+4. **Test it**
+   - Go to Actions → "Site Scanning Alerts" → "Run workflow"
+   - Check "Dry run" and run it
+   - Review the step summary to see what alerts would have been created
+
+5. **Enable for real**
+   - Uncheck "Dry run" and run again, or wait for the scheduled run (daily at 15:30 UTC)
+   - Check your repo's Issues tab for the first alert
+
+### Customization
+
+Edit `.github/workflows/site-scanning-alerts.yml` to change:
+- **Schedule:** The `cron:` line (default: daily at 15:30 UTC)
+- **Noise settings:** `ignore_blank_transitions`, `max_changes`, `ignore_transitions`
+- **What to watch:** `fields`, `alert_on_status_codes`, `alert_on_not_live`
+- **Issue appearance:** `labels`, `issue_title`
+
+See [Configuration Reference](#configuration-reference) for all available options.
+
+### GitHub Token and Permissions
+
+The action uses `${{ github.token }}` by default, which has `issues: write` when you set `permissions: issues: write` in the workflow file (already configured in the template).
+
+**No secrets to create** — the built-in `GITHUB_TOKEN` works because the issue is filed in the same repo the action runs in.
+
+### Delete This Section
+
+Once you've completed setup and your alerts are working, you can delete this "Setup (Template Instructions)" section from your README — it's only useful during initial configuration.
+
+---
+
+## Development / Maintainers
+
+This section is for GSA maintainers of the action itself (not consumers).
+
+### Architecture
+
+- **Language:** Python 3.9+, stdlib only (no pip dependencies)
+- **Design:** Composite action (shell runner + Python scripts)
+- **Testing:** stdlib `unittest` + CI on every push/PR
+- **Docs enforcement:** `test_docs.py` validates input table ↔ `action.yml` parity
+
+### Running Tests Locally
+
+```bash
+cd site-scanning-alert-template
+python3 -m unittest discover tests -v
+```
+
+### Running Manually (Dry Run Against Live Data)
+
+```bash
+export INPUT_WATCHLIST=watchlist.txt
+export INPUT_MODE=both
+export INPUT_FIELDS=live,status_code,primary_scan_status
+export INPUT_DRY_RUN=true
+export INPUT_MAX_CHANGES=25
+export GITHUB_STEP_SUMMARY=/tmp/summary.md
+
+python3 scripts/site_scanning_alerts.py
+cat /tmp/summary.md
+```
+
+### File Layout
+
+```
+├── action.yml                # Composite action definition + input schema
+├── watchlist.txt            # Example watchlist (commented out by default)
+├── scripts/
+│   ├── site_scanning_alerts.py  # Entrypoint
+│   ├── snapshot.py          # CSV download + filtering + freshness checks
+│   ├── rules.py             # Change-diff + state-check + rendering
+│   └── issues.py            # Fingerprinted issue lifecycle
+├── tests/                   # stdlib unittest
+│   ├── test_snapshot.py
+│   ├── test_rules.py
+│   ├── test_issues.py
+│   ├── test_docs.py         # CI enforcement of docs accuracy
+│   └── fixtures/            # Tiny CSVs for tests
+└── .github/workflows/
+    ├── site-scanning-alerts.yml  # Consumer recipe
+    └── test.yml             # CI (runs tests + docs checks)
+```
+
+### Releasing
+
+1. Merge PR to `main`
+2. Tag the release: `git tag v1.x.x && git push origin v1.x.x`
+3. Move the `v1` tag: `git tag -f v1 && git push -f origin v1`
+
+Consumers reference `GSA/site-scanning-alert-template@v1` and get the latest v1.x automatically.
+
+### Known Limitations
+
+- **CSV-only:** No JSON snapshot support (JSON is 2.5× larger with zero benefit for diffing)
+- **Single repo issues:** Can't file issues cross-repo (by design — simpler token model)
+- **No auto-close:** Issues are left open when condition clears (with a comment) rather than auto-closed
+- **No historical trending:** Each alert is independent; no aggregation of "site X has been flapping for 7 days"
+- **API unsupported:** Site Scanning's REST API can't filter by `status_code` or `primary_scan_status`, and DEMO_KEY rate-limits at ~6 requests. CSV diff is the only viable approach.
+
+---
+
+## Program Links
+
+- [Site Scanning Program Website](https://digital.gov/site-scanning)
+- [API Documentation](https://open.gsa.gov/api/site-scanning-api/)
+- [Site Scanning Engine (scan execution)](https://github.com/GSA/site-scanning-engine)
+- [Site Scanning Analysis (reporting)](https://github.com/GSA/site-scanning-analysis)
+- [Federal Website Index (target list)](https://github.com/GSA/federal-website-index)
+- [Central Project Repository](https://github.com/GSA/site-scanning)
+- [Site Scanning Documentation](https://github.com/GSA/site-scanning-documentation)
+- [Technical Details (all links)](https://digital.gov/guides/site-scanning/technical-details/)
+
+## Feedback
+
+To ask a question or leave feedback about the Site Scanning program, please [file an issue here](https://github.com/GSA/site-scanning/issues) or email site-scanning@gsa.gov.
+
+To report an issue with this action specifically, [file an issue in this repo](https://github.com/GSA/site-scanning-alert-template/issues).

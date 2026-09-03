@@ -1,0 +1,19 @@
+# Site Scanning Alert Watchlist
+#
+# Add the federal websites you want to monitor, one per line.
+# Two syntaxes are supported:
+#
+# 1. Exact initial_domain match (Model 1 from the README):
+#    blog.acme.gov
+#    calendar.acme.gov
+#
+# 2. All records under a base domain (Model 2):
+#    base:cpsc.gov
+#
+# Lines starting with # are comments and are ignored.
+# Blank lines are ignored.
+#
+# Example entries (commented out - uncomment and edit to use):
+# blog.gsa.gov
+# www.gsa.gov
+# base:gsa.gov
