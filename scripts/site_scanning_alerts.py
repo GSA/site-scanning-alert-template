@@ -120,7 +120,8 @@ def main():
                     "Site Scanning data is stale",
                     msg,
                     labels,
-                    comment_on_clear
+                    is_clear=False,
+                    comment_on_clear=comment_on_clear
                 )
                 print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
             
@@ -205,7 +206,8 @@ def main():
                 issue_title,
                 body,
                 labels,
-                comment_on_clear
+                is_clear=(len(all_alerts) == 0),
+                comment_on_clear=comment_on_clear
             )
             
             action = result['action']

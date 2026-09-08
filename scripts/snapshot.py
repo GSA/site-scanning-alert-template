@@ -11,7 +11,6 @@ import urllib.error
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 import time
-import ssl
 
 
 # Columns needed for alert evaluation
@@ -52,16 +51,12 @@ def download_snapshot(
         SnapshotError: On download or parse failure after retries
     """
     csv.field_size_limit(10 ** 7)  # Handle Site Scanning's 2000-char truncated fields
-    
-    # Create SSL context that doesn't verify certificates
-    # (matches site-scanning-analysis main.py:122-123 pattern)
-    ssl_context = ssl._create_unverified_context()
-    
+
     last_error = None
     for attempt in range(retry_count):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'GSA-Site-Scanning-Alert-Action'})
-            with urllib.request.urlopen(req, timeout=180, context=ssl_context) as response:
+            with urllib.request.urlopen(req, timeout=180) as response:
                 raw = response.read()
             
             # Parse CSV with optional column projection

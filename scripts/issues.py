@@ -87,24 +87,31 @@ class IssueClient:
         # Use list-by-label endpoint (no search API rate limit)
         # GET /repos/:owner/:repo/issues?labels=label1,label2&state=open
         label_str = ','.join(labels)
-        path = f"/issues?labels={label_str}&state=open&per_page=100"
-        
-        issues = self._request('GET', path)
-        
-        for issue in issues:
-            # Skip pull requests (they appear in /issues but have a pull_request key)
-            if 'pull_request' in issue:
-                continue
-            
-            body = issue.get('body', '')
-            if marker in body:
-                return {
-                    'number': issue['number'],
-                    'html_url': issue['html_url'],
-                    'body': body
-                }
-        
-        return None
+        page = 1
+        while True:
+            path = f"/issues?labels={label_str}&state=open&per_page=100&page={page}"
+            issues = self._request('GET', path)
+
+            if not issues:
+                return None
+
+            for issue in issues:
+                # Skip pull requests (they appear in /issues but have a pull_request key)
+                if 'pull_request' in issue:
+                    continue
+
+                body = issue.get('body', '')
+                if marker in body:
+                    return {
+                        'number': issue['number'],
+                        'html_url': issue['html_url'],
+                        'body': body
+                    }
+
+            if len(issues) < 100:
+                return None
+
+            page += 1
     
     def create_issue(
         self,
@@ -170,18 +177,21 @@ def handle_alert_lifecycle(
     title: str,
     body: str,
     labels: List[str],
+    is_clear: bool,
     comment_on_clear: bool = True
 ) -> Dict[str, any]:
     """
     Manage full alert issue lifecycle with fingerprinting.
-    
+
     Args:
         client: IssueClient instance
         title: Issue title
         body: Alert body (without fingerprint marker)
         labels: List of label names to apply
+        is_clear: True if the caller has determined no alert conditions are
+            currently active (e.g. zero alerts found this run)
         comment_on_clear: If True, comment when condition clears
-    
+
     Returns:
         Dict with keys:
             - action: 'created', 'commented', 'no-op', or 'cleared'
@@ -192,17 +202,15 @@ def handle_alert_lifecycle(
     if labels:
         for label in labels:
             client.ensure_label(label)
-    
+
     # Compute fingerprint of this alert
     fingerprint = compute_fingerprint(body)
     marker = f"<!-- alert-fingerprint:"  # Partial marker for search
-    
+
     # Search for existing open issue
     existing = client.find_open_issue(labels, marker) if labels else None
-    
-    # Case 1: No alerts (body indicates cleared condition)
-    is_clear = "have returned to normal" in body or "operating as expected" in body
-    
+
+    # Case 1: No active alert conditions
     if is_clear:
         if existing and comment_on_clear:
             # Condition cleared - add comment but don't close
@@ -214,7 +222,11 @@ def handle_alert_lifecycle(
                 'fingerprint': fingerprint
             }
         else:
-            return {'action': 'no-op', 'issue_url': None, 'fingerprint': fingerprint}
+            return {
+                'action': 'no-op',
+                'issue_url': existing['html_url'] if existing else None,
+                'fingerprint': fingerprint
+            }
     
     # Case 2: No existing issue - create new
     if not existing:
