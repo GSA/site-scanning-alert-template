@@ -208,5 +208,104 @@ class TestAlertLifecycle(unittest.TestCase):
         self.assertIsNone(result['issue_url'])
 
 
+class MarkerFilteringFakeClient:
+    """
+    A more faithful in-memory fake than FakeIssueClient: filters
+    find_open_issue by marker the way the real client does, so it can
+    exercise stream isolation between alert kinds sharing the same labels.
+    """
+
+    def __init__(self):
+        self.issues = []  # list of {'number', 'html_url', 'body'}
+        self.comments = []
+        self._next_number = 1
+
+    def ensure_label(self, label, color='0366d6', description=''):
+        pass
+
+    def find_open_issue(self, labels, marker):
+        for issue in self.issues:
+            if marker in issue['body']:
+                return issue
+        return None
+
+    def create_issue(self, title, body, labels):
+        issue = {
+            'number': self._next_number,
+            'html_url': f'https://github.com/owner/repo/issues/{self._next_number}',
+            'body': body,
+        }
+        self.issues.append(issue)
+        self._next_number += 1
+        return {'number': issue['number'], 'html_url': issue['html_url']}
+
+    def comment_on_issue(self, issue_number, comment):
+        self.comments.append({'issue_number': issue_number, 'comment': comment})
+
+
+class TestStreamIsolation(unittest.TestCase):
+    """
+    Regression coverage for the alerts/staleness marker collision: both
+    streams share the same labels, so without a stream-scoped marker,
+    find_open_issue can't tell them apart.
+    """
+
+    def test_alerts_and_staleness_create_separate_issues(self):
+        client = MarkerFilteringFakeClient()
+
+        alert_result = handle_alert_lifecycle(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert'], is_clear=False, stream='alerts'
+        )
+        stale_result = handle_alert_lifecycle(
+            client, 'Site Scanning data is stale', 'data is stale',
+            ['site-scanning-alert'], is_clear=False, stream='staleness'
+        )
+
+        self.assertEqual(alert_result['action'], 'created')
+        self.assertEqual(stale_result['action'], 'created')
+        self.assertEqual(len(client.issues), 2)
+        self.assertNotEqual(alert_result['issue_url'], stale_result['issue_url'])
+        self.assertEqual(len(client.comments), 0)
+
+    def test_staleness_rerun_does_not_comment_on_alert_issue(self):
+        client = MarkerFilteringFakeClient()
+        handle_alert_lifecycle(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert'], is_clear=False, stream='alerts'
+        )
+        handle_alert_lifecycle(
+            client, 'Site Scanning data is stale', 'data is stale',
+            ['site-scanning-alert'], is_clear=False, stream='staleness'
+        )
+
+        # Re-run staleness with an unchanged message: must be a no-op on the
+        # staleness issue, and must never touch the alert issue or comment
+        # at all (this is the bug: without stream scoping, this used to
+        # match the alert issue and post a spurious comment onto it).
+        result = handle_alert_lifecycle(
+            client, 'Site Scanning data is stale', 'data is stale',
+            ['site-scanning-alert'], is_clear=False, stream='staleness'
+        )
+
+        self.assertEqual(result['action'], 'no-op')
+        self.assertEqual(result['issue_url'], client.issues[1]['html_url'])
+        self.assertEqual(len(client.comments), 0)
+
+    def test_default_stream_is_alerts(self):
+        client = MarkerFilteringFakeClient()
+
+        handle_alert_lifecycle(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert'], is_clear=False  # no explicit stream
+        )
+        result = handle_alert_lifecycle(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert'], is_clear=False, stream='alerts'
+        )
+
+        self.assertEqual(result['action'], 'no-op')  # same stream, same fingerprint
+
+
 if __name__ == '__main__':
     unittest.main()

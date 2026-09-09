@@ -121,7 +121,8 @@ def main():
                     msg,
                     labels,
                     is_clear=False,
-                    comment_on_clear=comment_on_clear
+                    comment_on_clear=comment_on_clear,
+                    stream='staleness'
                 )
                 print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
             
@@ -207,7 +208,8 @@ def main():
                 body,
                 labels,
                 is_clear=(len(all_alerts) == 0),
-                comment_on_clear=comment_on_clear
+                comment_on_clear=comment_on_clear,
+                stream='alerts'
             )
             
             action = result['action']

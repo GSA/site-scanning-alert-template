@@ -9,7 +9,7 @@ import hashlib
 import json
 import urllib.request
 import urllib.error
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 
 
 class IssueClient:
@@ -145,19 +145,30 @@ class IssueClient:
 def compute_fingerprint(body: str) -> str:
     """
     Compute stable fingerprint of an alert body.
-    
-    Strips the marker comment itself and non-semantic whitespace before hashing.
+
+    Strips the marker comments themselves and non-semantic whitespace before hashing.
     """
-    # Remove any existing fingerprint marker
-    lines = [line for line in body.split('\n') if not line.strip().startswith('<!-- alert-fingerprint:')]
+    # Remove any existing fingerprint/stream markers
+    lines = [
+        line for line in body.split('\n')
+        if not line.strip().startswith('<!-- alert-fingerprint:')
+        and not line.strip().startswith('<!-- alert-stream:')
+    ]
     normalized = '\n'.join(lines).strip()
     return hashlib.sha256(normalized.encode()).hexdigest()[:12]
 
 
-def embed_fingerprint(body: str, fingerprint: str) -> str:
-    """Embed fingerprint as HTML comment in body."""
-    marker = f"<!-- alert-fingerprint: {fingerprint} -->"
-    return f"{marker}\n\n{body}"
+def embed_fingerprint(body: str, fingerprint: str, stream: str = 'alerts') -> str:
+    """
+    Embed fingerprint and stream markers as HTML comments in body.
+
+    The stream marker (e.g. 'alerts' vs 'staleness') lets find_open_issue
+    distinguish issues filed by different alert kinds that share the same
+    labels, so one kind never mistakes another's issue for its own.
+    """
+    stream_marker = f"<!-- alert-stream: {stream} -->"
+    fp_marker = f"<!-- alert-fingerprint: {fingerprint} -->"
+    return f"{stream_marker}\n{fp_marker}\n\n{body}"
 
 
 def extract_fingerprint(body: str) -> Optional[str]:
@@ -178,8 +189,9 @@ def handle_alert_lifecycle(
     body: str,
     labels: List[str],
     is_clear: bool,
-    comment_on_clear: bool = True
-) -> Dict[str, any]:
+    comment_on_clear: bool = True,
+    stream: str = 'alerts'
+) -> Dict[str, Any]:
     """
     Manage full alert issue lifecycle with fingerprinting.
 
@@ -191,6 +203,10 @@ def handle_alert_lifecycle(
         is_clear: True if the caller has determined no alert conditions are
             currently active (e.g. zero alerts found this run)
         comment_on_clear: If True, comment when condition clears
+        stream: Distinguishes alert kinds that share the same labels (e.g.
+            'alerts' vs 'staleness'), so find_open_issue only matches an
+            issue filed by this same stream and never cross-contaminates
+            with another stream's issue.
 
     Returns:
         Dict with keys:
@@ -205,9 +221,9 @@ def handle_alert_lifecycle(
 
     # Compute fingerprint of this alert
     fingerprint = compute_fingerprint(body)
-    marker = f"<!-- alert-fingerprint:"  # Partial marker for search
+    marker = f"<!-- alert-stream: {stream} -->"
 
-    # Search for existing open issue
+    # Search for existing open issue from this same stream
     existing = client.find_open_issue(labels, marker) if labels else None
 
     # Case 1: No active alert conditions
@@ -230,7 +246,7 @@ def handle_alert_lifecycle(
     
     # Case 2: No existing issue - create new
     if not existing:
-        body_with_fp = embed_fingerprint(body, fingerprint)
+        body_with_fp = embed_fingerprint(body, fingerprint, stream)
         result = client.create_issue(title, body_with_fp, labels)
         return {
             'action': 'created',
@@ -250,7 +266,7 @@ def handle_alert_lifecycle(
         }
     else:
         # Changed alert - add comment with new findings
-        body_with_fp = embed_fingerprint(body, fingerprint)
+        body_with_fp = embed_fingerprint(body, fingerprint, stream)
         comment = f"🔄 **Alert updated**\n\n{body_with_fp}"
         client.comment_on_issue(existing['number'], comment)
         return {
