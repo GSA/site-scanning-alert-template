@@ -11,8 +11,10 @@ from issues import (
     compute_fingerprint,
     embed_fingerprint,
     extract_fingerprint,
+    has_cleared_marker,
     IssueClient,
-    handle_alert_lifecycle
+    handle_alert_lifecycle,
+    MAX_ISSUE_PAGES
 )
 
 
@@ -89,6 +91,40 @@ class TestIssueClientMock(unittest.TestCase):
         self.assertIsNone(result)
         mock_request.assert_called_once()
 
+    def test_find_open_issue_stops_at_page_ceiling(self):
+        """A repo with unbounded matching open issues must not be walked forever."""
+        client = IssueClient('owner/repo', 'token')
+
+        full_page = [{'number': n, 'html_url': f'u{n}', 'body': 'no marker here'} for n in range(100)]
+
+        with patch.object(client, '_request', return_value=full_page) as mock_request:
+            result = client.find_open_issue(['site-scanning-alert'], '<!-- alert-fingerprint:')
+
+        self.assertIsNone(result)
+        self.assertEqual(mock_request.call_count, MAX_ISSUE_PAGES)
+
+    def test_find_open_issue_url_encodes_labels(self):
+        """Labels with spaces/commas must not produce a malformed query string."""
+        client = IssueClient('owner/repo', 'token')
+
+        with patch.object(client, '_request', return_value=[]) as mock_request:
+            client.find_open_issue(['needs encoding'], '<!-- alert-fingerprint:')
+
+        path = mock_request.call_args_list[0][0][1]
+        self.assertNotIn(' ', path)
+        self.assertIn('needs+encoding', path)
+
+    def test_ensure_label_url_encodes_label(self):
+        client = IssueClient('owner/repo', 'token')
+
+        with patch.object(client, '_request', return_value={}) as mock_request:
+            client.ensure_label('needs encoding')
+
+        method, path = mock_request.call_args_list[0][0][:2]
+        self.assertEqual(method, 'GET')
+        self.assertNotIn(' ', path)
+        self.assertIn('needs%20encoding', path)
+
 
 class FakeIssueClient:
     """In-memory stand-in for IssueClient, for lifecycle testing without HTTP."""
@@ -97,9 +133,11 @@ class FakeIssueClient:
         self.existing_issue = existing_issue
         self.created = []
         self.comments = []
+        self.updates = []
+        self.ensure_label_calls = []
 
     def ensure_label(self, label, color='0366d6', description=''):
-        pass
+        self.ensure_label_calls.append(label)
 
     def find_open_issue(self, labels, marker):
         return self.existing_issue
@@ -110,6 +148,14 @@ class FakeIssueClient:
 
     def comment_on_issue(self, issue_number, comment):
         self.comments.append({'issue_number': issue_number, 'comment': comment})
+
+    def update_issue(self, issue_number, body):
+        self.updates.append({'issue_number': issue_number, 'body': body})
+        # Write back into the same dict find_open_issue returns, so a
+        # subsequent handle_alert_lifecycle call in the same test sees the
+        # patched body - without this, findings #1/#2 regress invisibly.
+        if self.existing_issue and self.existing_issue['number'] == issue_number:
+            self.existing_issue['body'] = body
 
 
 class TestAlertLifecycle(unittest.TestCase):
@@ -207,6 +253,120 @@ class TestAlertLifecycle(unittest.TestCase):
         self.assertEqual(result['action'], 'no-op')
         self.assertIsNone(result['issue_url'])
 
+    def test_changed_alert_patches_body_so_next_identical_run_is_noop(self):
+        """
+        Regression for finding #1: a changed alert must update the issue
+        body's fingerprint, not just comment - otherwise every subsequent
+        run re-compares against the stale Day 1 fingerprint and comments
+        again even though nothing new happened.
+        """
+        existing = {
+            'number': 1,
+            'html_url': 'https://github.com/owner/repo/issues/1',
+            'body': embed_fingerprint('old alert body', compute_fingerprint('old alert body'))
+        }
+        client = FakeIssueClient(existing_issue=existing)
+
+        first = handle_alert_lifecycle(
+            client, 'Possible website issues', 'new alert body',
+            ['site-scanning-alert'], is_clear=False
+        )
+        self.assertEqual(first['action'], 'commented')
+        self.assertEqual(len(client.updates), 1)
+
+        # Re-run with the same (now current) alert body - must be a no-op,
+        # not another "Alert updated" comment.
+        second = handle_alert_lifecycle(
+            client, 'Possible website issues', 'new alert body',
+            ['site-scanning-alert'], is_clear=False
+        )
+        self.assertEqual(second['action'], 'no-op')
+        self.assertEqual(len(client.comments), 1)  # still just the first run's comment
+
+    def test_cleared_flag_prevents_second_daily_comment(self):
+        """
+        Regression for finding #2: once a cleared condition is reported,
+        it must not be reported again on the next healthy run.
+        """
+        existing = {
+            'number': 1,
+            'html_url': 'https://github.com/owner/repo/issues/1',
+            'body': embed_fingerprint('old alert body', compute_fingerprint('old alert body'))
+        }
+        client = FakeIssueClient(existing_issue=existing)
+
+        first = handle_alert_lifecycle(
+            client, 'Possible website issues', 'all clear',
+            ['site-scanning-alert'], is_clear=True, comment_on_clear=True
+        )
+        self.assertEqual(first['action'], 'cleared')
+        self.assertEqual(len(client.comments), 1)
+        self.assertTrue(has_cleared_marker(client.existing_issue['body']))
+
+        second = handle_alert_lifecycle(
+            client, 'Possible website issues', 'all clear',
+            ['site-scanning-alert'], is_clear=True, comment_on_clear=True
+        )
+        self.assertEqual(second['action'], 'no-op')
+        self.assertEqual(len(client.comments), 1)
+
+    def test_alert_refires_after_clear_even_with_matching_fingerprint(self):
+        """
+        If an alert clears and then the exact same failure reappears, the
+        cleared marker must force a comment rather than a no-op, even
+        though the fingerprint matches what was on the issue before it
+        cleared.
+        """
+        body = 'site is down'
+        fp = compute_fingerprint(body)
+        existing = {
+            'number': 1,
+            'html_url': 'https://github.com/owner/repo/issues/1',
+            'body': embed_fingerprint(body, fp, cleared=True)
+        }
+        client = FakeIssueClient(existing_issue=existing)
+
+        result = handle_alert_lifecycle(
+            client, 'Possible website issues', body,
+            ['site-scanning-alert'], is_clear=False
+        )
+
+        self.assertEqual(result['action'], 'commented')
+        self.assertEqual(len(client.comments), 1)
+        self.assertIn('re-fired', client.comments[0]['comment'])
+        # The patched body must drop the cleared marker now that the
+        # condition is active again.
+        self.assertFalse(has_cleared_marker(client.updates[0]['body']))
+
+    def test_ensure_label_only_called_on_creation(self):
+        """
+        Regression for the API-hygiene finding: ensure_label should not
+        run on every no-op/commented/cleared run, only when an issue is
+        first created.
+        """
+        client = FakeIssueClient(existing_issue=None)
+
+        handle_alert_lifecycle(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert', 'other-label'], is_clear=False
+        )
+        self.assertEqual(client.ensure_label_calls, ['site-scanning-alert', 'other-label'])
+
+        # Now that the issue exists, subsequent runs must not call
+        # ensure_label again.
+        client.existing_issue = {
+            'number': 1,
+            'html_url': 'https://github.com/owner/repo/issues/1',
+            'body': client.created[0]['body'],
+        }
+        client.ensure_label_calls.clear()
+
+        handle_alert_lifecycle(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert', 'other-label'], is_clear=False
+        )
+        self.assertEqual(client.ensure_label_calls, [])
+
 
 class MarkerFilteringFakeClient:
     """
@@ -241,6 +401,12 @@ class MarkerFilteringFakeClient:
 
     def comment_on_issue(self, issue_number, comment):
         self.comments.append({'issue_number': issue_number, 'comment': comment})
+
+    def update_issue(self, issue_number, body):
+        for issue in self.issues:
+            if issue['number'] == issue_number:
+                issue['body'] = body
+                return
 
 
 class TestStreamIsolation(unittest.TestCase):

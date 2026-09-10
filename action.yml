@@ -17,7 +17,7 @@ inputs:
     default: 'both'
   
   fields:
-    description: 'Comma-separated list of fields to monitor for changes (change mode only). Available: live, status_code, primary_scan_status'
+    description: 'Comma-separated list of fields to monitor for changes (change mode only). Any column present in the Site Scanning snapshot is supported (e.g. live, status_code, primary_scan_status, https_enforced, hsts). Unrecognized field names are reported in the step summary and skipped.'
     required: false
     default: 'live,status_code,primary_scan_status'
   

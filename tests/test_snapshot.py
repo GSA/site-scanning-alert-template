@@ -3,16 +3,42 @@
 import unittest
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
 from snapshot import (
+    download_snapshot,
     filter_to_watchlist,
+    find_unmatched_entries,
     parse_scan_date,
     check_snapshot_freshness,
-    has_snapshot_rotated
+    has_snapshot_rotated,
+    REQUIRED_COLUMNS,
+    SnapshotError
 )
 from datetime import datetime, timedelta
+
+
+class FakeHttpResponse:
+    """Minimal stand-in for the context manager urllib.request.urlopen returns."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _csv_bytes(header, rows):
+    lines = [','.join(header)] + [','.join(row) for row in rows]
+    return ('\n'.join(lines)).encode('utf-8')
 
 
 class TestSnapshotFiltering(unittest.TestCase):
@@ -58,6 +84,71 @@ class TestSnapshotFiltering(unittest.TestCase):
         filtered = filter_to_watchlist(rows, watchlist)
         
         self.assertEqual(len(filtered), 3)
+
+
+class TestDownloadSnapshotColumnProjection(unittest.TestCase):
+    """
+    Regression coverage for finding #7: a user's custom `fields` input
+    must not be silently discarded by column projection, but a genuinely
+    missing *required* column must still hard-fail.
+    """
+
+    def test_optional_column_kept_when_present(self):
+        csv_bytes = _csv_bytes(
+            REQUIRED_COLUMNS + ['https_enforced'],
+            [['test.gov', 'test.gov', 'true', '200', 'completed', '2026-09-02', 'true']]
+        )
+        with patch('snapshot.urllib.request.urlopen', return_value=FakeHttpResponse(csv_bytes)):
+            rows = download_snapshot(
+                'http://example.test/latest.csv', REQUIRED_COLUMNS,
+                optional_columns=['https_enforced']
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['https_enforced'], 'true')
+
+    def test_optional_column_dropped_silently_when_absent(self):
+        csv_bytes = _csv_bytes(
+            REQUIRED_COLUMNS,
+            [['test.gov', 'test.gov', 'true', '200', 'completed', '2026-09-02']]
+        )
+        with patch('snapshot.urllib.request.urlopen', return_value=FakeHttpResponse(csv_bytes)):
+            rows = download_snapshot(
+                'http://example.test/latest.csv', REQUIRED_COLUMNS,
+                optional_columns=['bogus_field']
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn('bogus_field', rows[0])
+
+    def test_missing_required_column_still_raises(self):
+        csv_bytes = _csv_bytes(['initial_domain'], [['test.gov']])
+        with patch('snapshot.urllib.request.urlopen', return_value=FakeHttpResponse(csv_bytes)):
+            with self.assertRaises(SnapshotError):
+                download_snapshot('http://example.test/latest.csv', REQUIRED_COLUMNS, retry_count=1)
+
+
+class TestFindUnmatchedEntries(unittest.TestCase):
+    """Regression coverage for finding #6: typo'd/missing watchlist entries must be reported."""
+
+    def test_all_matched_returns_empty(self):
+        rows = [{'initial_domain': 'test1.gov', 'initial_base_domain': 'test1.gov'}]
+        self.assertEqual(find_unmatched_entries(rows, ['test1.gov']), [])
+
+    def test_typo_domain_is_reported(self):
+        rows = [{'initial_domain': 'test1.gov', 'initial_base_domain': 'test1.gov'}]
+        self.assertEqual(find_unmatched_entries(rows, ['test1.gov', 'tset1.gov']), ['tset1.gov'])
+
+    def test_base_prefix_matched_and_unmatched(self):
+        rows = [{'initial_domain': 'www.test.gov', 'initial_base_domain': 'test.gov'}]
+        self.assertEqual(
+            find_unmatched_entries(rows, ['base:test.gov', 'base:other.gov']),
+            ['base:other.gov']
+        )
+
+    def test_case_insensitive_match(self):
+        rows = [{'initial_domain': 'Test1.gov', 'initial_base_domain': 'Test1.gov'}]
+        self.assertEqual(find_unmatched_entries(rows, ['test1.gov']), [])
 
 
 class TestScanDateParsing(unittest.TestCase):

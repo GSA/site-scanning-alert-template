@@ -10,6 +10,7 @@ from rules import (
     Alert,
     evaluate_change_diff,
     evaluate_state_check,
+    dedupe_alerts,
     parse_ignore_transitions,
     render_alerts
 )
@@ -100,6 +101,74 @@ class TestStateCheck(unittest.TestCase):
         
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0].field, 'live')
+
+
+class TestDedupeAlerts(unittest.TestCase):
+    """
+    Regression coverage for finding #4: `both` mode can raise a change
+    alert and a state alert for the same underlying failure.
+    """
+
+    def test_change_wins_over_state_for_same_domain_field(self):
+        alerts = [
+            Alert('test.gov', 'status_code', '200', '503', 'change'),
+            Alert('test.gov', 'status_code', '', '503', 'state'),
+        ]
+
+        result = dedupe_alerts(alerts)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].alert_type, 'change')
+        self.assertEqual(result[0].old_value, '200')
+
+    def test_change_wins_regardless_of_append_order(self):
+        alerts = [
+            Alert('test.gov', 'status_code', '', '503', 'state'),
+            Alert('test.gov', 'status_code', '200', '503', 'change'),
+        ]
+
+        result = dedupe_alerts(alerts)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].alert_type, 'change')
+
+    def test_distinct_fields_both_survive(self):
+        alerts = [
+            Alert('test.gov', 'status_code', '200', '503', 'change'),
+            Alert('test.gov', 'primary_scan_status', '', 'timeout', 'state'),
+        ]
+
+        result = dedupe_alerts(alerts)
+
+        self.assertEqual(len(result), 2)
+
+    def test_distinct_domains_never_collapse(self):
+        alerts = [
+            Alert('a.gov', 'status_code', '200', '503', 'change'),
+            Alert('b.gov', 'status_code', '', '503', 'state'),
+        ]
+
+        result = dedupe_alerts(alerts)
+
+        self.assertEqual(len(result), 2)
+
+    def test_two_corpus_alerts_on_one_domain_both_survive(self):
+        alerts = [
+            Alert('a.gov', '', '', 'newly in snapshot', 'corpus'),
+            Alert('a.gov', '', '', 'no longer in snapshot', 'corpus'),
+        ]
+
+        result = dedupe_alerts(alerts)
+
+        self.assertEqual(len(result), 2)
+
+    def test_state_alone_survives_when_no_matching_change(self):
+        alerts = [Alert('test.gov', 'status_code', '', '503', 'state')]
+
+        result = dedupe_alerts(alerts)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].alert_type, 'state')
 
 
 class TestParseIgnoreTransitions(unittest.TestCase):

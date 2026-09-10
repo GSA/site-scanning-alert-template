@@ -33,22 +33,30 @@ def download_snapshot(
     url: str,
     wanted_columns: Optional[List[str]] = None,
     retry_count: int = 3,
-    retry_delay: float = 2.0
+    retry_delay: float = 2.0,
+    optional_columns: Optional[List[str]] = None
 ) -> List[Dict[str, str]]:
     """
     Download and parse a Site Scanning CSV snapshot.
-    
+
     Args:
         url: URL of the CSV snapshot
-        wanted_columns: List of column names to project (None = all columns)
+        wanted_columns: List of column names to project (None = all columns).
+            Missing columns raise SnapshotError - these are required.
         retry_count: Number of retries on transient failures
         retry_delay: Seconds to wait between retries
-    
+        optional_columns: Extra column names to keep if present (e.g. a
+            user's custom `fields` input). Unlike wanted_columns, a missing
+            optional column is not an error - it's simply absent from the
+            returned rows, so the caller can detect and warn about it.
+
     Returns:
-        List of dicts, one per row, with only wanted_columns present
-    
+        List of dicts, one per row, with wanted_columns plus any present
+        optional_columns
+
     Raises:
-        SnapshotError: On download or parse failure after retries
+        SnapshotError: On download or parse failure after retries, or if a
+            required (wanted) column is missing
     """
     csv.field_size_limit(10 ** 7)  # Handle Site Scanning's 2000-char truncated fields
 
@@ -58,17 +66,17 @@ def download_snapshot(
             req = urllib.request.Request(url, headers={'User-Agent': 'GSA-Site-Scanning-Alert-Action'})
             with urllib.request.urlopen(req, timeout=180) as response:
                 raw = response.read()
-            
+
             # Parse CSV with optional column projection
             rows = []
             reader = csv.DictReader(raw.decode('utf-8', errors='replace').splitlines())
-            
+
             if reader.fieldnames is None:
                 raise SnapshotError(f"Snapshot at {url} has no header row")
-            
+
             # Determine which columns to keep
+            available = set(reader.fieldnames)
             if wanted_columns:
-                available = set(reader.fieldnames)
                 missing = set(wanted_columns) - available
                 if missing:
                     raise SnapshotError(
@@ -77,15 +85,18 @@ def download_snapshot(
                 keep = set(wanted_columns)
             else:
                 keep = set(reader.fieldnames)
-            
+
+            if optional_columns:
+                keep |= (set(optional_columns) & available)
+
             for row in reader:
                 # Project to wanted columns only
                 filtered = {k: (v or '') for k, v in row.items() if k in keep}
                 rows.append(filtered)
-            
+
             if not rows:
                 raise SnapshotError(f"Snapshot at {url} contains zero rows")
-            
+
             return rows
         
         except urllib.error.HTTPError as e:
@@ -140,6 +151,41 @@ def filter_to_watchlist(
             filtered.append(row)
     
     return filtered
+
+
+def find_unmatched_entries(
+    rows: List[Dict[str, str]],
+    watchlist: List[str]
+) -> List[str]:
+    """
+    Find watchlist entries that match nothing in the (unfiltered) snapshot.
+
+    Mirrors filter_to_watchlist's matching rules exactly (base:/exact,
+    case-insensitive) so an entry reported here is genuinely never going to
+    trigger an alert - e.g. because of a typo or a domain that's been
+    dropped from the Site Scanning index.
+
+    Args:
+        rows: Full snapshot rows (not pre-filtered to the watchlist)
+        watchlist: Raw watchlist entries, as loaded from the watchlist file
+
+    Returns:
+        List of watchlist entries (original casing/prefix) with zero matches
+    """
+    present_domains = {row.get('initial_domain', '').lower() for row in rows}
+    present_bases = {row.get('initial_base_domain', '').lower() for row in rows}
+
+    unmatched = []
+    for entry in watchlist:
+        stripped = entry.strip()
+        if stripped.startswith('base:'):
+            if stripped[5:].lower() not in present_bases:
+                unmatched.append(entry)
+        else:
+            if stripped.lower() not in present_domains:
+                unmatched.append(entry)
+
+    return unmatched
 
 
 def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
