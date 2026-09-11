@@ -177,5 +177,206 @@ class TestUnmatchedWatchlistWarning(SiteScanningAlertsTestCase):
         self.assertNotIn('test1.gov', unmatched_block)
 
 
+class TestEmptyLabelsFallback(SiteScanningAlertsTestCase):
+    """
+    Regression for finding #2: an empty `labels` input must not cause the
+    action to create a brand-new issue on every run. It should fall back
+    to the default label and warn, rather than silently passing an empty
+    list into the issue lifecycle.
+    """
+
+    def test_empty_labels_falls_back_to_default_and_warns(self):
+        self._write_watchlist(['sub.test4.gov'])  # status_code 503 -> real alert
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            if 'previous' in url:
+                return PREVIOUS_ROWS
+            return LATEST_ROWS
+
+        captured = {}
+
+        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+            captured[stream] = labels
+            return {'action': 'created', 'issue_url': 'https://x/1', 'fingerprint': 'x'}
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_LABELS': '',
+            'INPUT_DRY_RUN': 'false',
+            'INPUT_TOKEN': 'fake-token',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
+             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(captured.get('alerts'), ['site-scanning-alert'])
+        summary = self._read_summary()
+        self.assertIn('labels', summary.lower())
+        self.assertIn('site-scanning-alert', summary)
+
+
+class TestInvalidModeRejected(SiteScanningAlertsTestCase):
+    """Regression for finding #7: an invalid mode must not fall through to a false clear."""
+
+    def test_invalid_mode_exits_with_error_before_any_download(self):
+        self._write_watchlist(['test1.gov'])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            raise AssertionError("download_snapshot must not be called for an invalid mode")
+
+        code = self._run_main({'INPUT_MODE': 'bogus'}, fake_download)
+
+        self.assertEqual(code, 1)
+        summary = self._read_summary()
+        self.assertIn('mode', summary.lower())
+        self.assertIn('bogus', summary)
+
+    def test_valid_modes_are_accepted(self):
+        for mode in ('change', 'state', 'both'):
+            with self.subTest(mode=mode):
+                wl = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+                wl.write('test1.gov\n')
+                wl.close()
+                summary = tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False)
+                summary.close()
+
+                def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+                    if 'previous' in url:
+                        return PREVIOUS_ROWS
+                    return LATEST_ROWS
+
+                env = dict(BASE_ENV)
+                env['INPUT_MODE'] = mode
+                env['INPUT_WATCHLIST'] = wl.name
+                env['GITHUB_STEP_SUMMARY'] = summary.name
+
+                try:
+                    with patch.dict(os.environ, env, clear=True), \
+                         patch.object(ssa, 'download_snapshot', side_effect=fake_download):
+                        with self.assertRaises(SystemExit) as cm:
+                            ssa.main()
+                    self.assertEqual(cm.exception.code, 0)
+                finally:
+                    os.unlink(wl.name)
+                    os.unlink(summary.name)
+
+
+class TestChangeModeCannotConfirmRecovery(SiteScanningAlertsTestCase):
+    """
+    Regression for finding #5: mode=change with zero detected changes must
+    not report the alert condition as cleared - the absence of a diff is
+    not evidence of recovery, only a state check can establish that.
+    """
+
+    def test_change_mode_with_no_diff_skips_alert_lifecycle(self):
+        self._write_watchlist(['test1.gov'])  # identical in latest/previous fixtures
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            if 'previous' in url:
+                return PREVIOUS_ROWS
+            return LATEST_ROWS
+
+        calls = []
+
+        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+            calls.append(stream)
+            return {'action': 'no-op', 'issue_url': None, 'fingerprint': 'x'}
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_MODE': 'change',
+            'INPUT_DRY_RUN': 'false',
+            'INPUT_TOKEN': 'fake-token',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
+             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        self.assertNotIn('alerts', calls)
+        summary = self._read_summary()
+        self.assertIn('cannot confirm recovery', summary.lower())
+
+    def test_both_mode_with_no_diff_still_clears_via_state_check(self):
+        """Guard against over-correcting: `both` mode must still clear normally."""
+        self._write_watchlist(['test1.gov'])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            if 'previous' in url:
+                return PREVIOUS_ROWS
+            return LATEST_ROWS
+
+        calls = []
+
+        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+            calls.append((stream, is_clear))
+            return {'action': 'no-op', 'issue_url': None, 'fingerprint': 'x'}
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_MODE': 'both',
+            'INPUT_DRY_RUN': 'false',
+            'INPUT_TOKEN': 'fake-token',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
+             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn(('alerts', True), calls)
+
+    def test_change_mode_still_alerts_when_changes_exist(self):
+        self._write_watchlist(['sub.test4.gov'])  # status_code 200 -> 503
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            if 'previous' in url:
+                return PREVIOUS_ROWS
+            return LATEST_ROWS
+
+        calls = []
+
+        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+            calls.append((stream, is_clear))
+            return {'action': 'created', 'issue_url': 'https://x/1', 'fingerprint': 'x'}
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_MODE': 'change',
+            'INPUT_DRY_RUN': 'false',
+            'INPUT_TOKEN': 'fake-token',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
+             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn(('alerts', False), calls)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -130,6 +130,37 @@ class TestDocumentation(unittest.TestCase):
             self.assertIn('issues: write', quickstart_yaml)
 
 
+class TestWorkflowConcurrency(unittest.TestCase):
+    """
+    Regression for finding #8: without a concurrency guard, an overlapping
+    scheduled run and a manually dispatched run can both observe no
+    matching open issue and each create one (find_open_issue is
+    non-atomic with create_issue). Serializing runs at the workflow level
+    is the practical fix, since the GitHub issues API has no
+    create-if-absent primitive.
+    """
+
+    def setUp(self):
+        self.repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        workflow_path = os.path.join(
+            self.repo_root, '.github', 'workflows', 'site-scanning-alerts.yml'
+        )
+        with open(workflow_path, 'r') as f:
+            self.workflow = f.read()
+
+    def test_workflow_has_concurrency_guard(self):
+        self.assertIn('concurrency:', self.workflow)
+        self.assertIn('cancel-in-progress: false', self.workflow)
+
+    def test_concurrency_guard_precedes_jobs(self):
+        # Concurrency must be a top-level key (applies to the whole
+        # workflow), not nested under a single job, so scheduled and
+        # workflow_dispatch runs of this same workflow always serialize.
+        concurrency_idx = self.workflow.index('concurrency:')
+        jobs_idx = self.workflow.index('\njobs:')
+        self.assertLess(concurrency_idx, jobs_idx)
+
+
 class TestExternalLinks(unittest.TestCase):
     """
     External link validation.

@@ -287,7 +287,7 @@ def parse_ignore_transitions(ignore_str: str) -> Set[Tuple[str, str, str]]:
         try:
             field_part, transition = entry.split(':', 1)
             old, new = transition.split('->', 1)
-            result.add((field_part, old, new))
+            result.add((field_part.strip(), old.strip(), new.strip()))
         except ValueError:
             # Malformed entry, skip
             continue

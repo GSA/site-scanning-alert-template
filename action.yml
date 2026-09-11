@@ -12,7 +12,7 @@ inputs:
     default: 'watchlist.txt'
   
   mode:
-    description: 'Alert mode: change (detect changes between latest and previous snapshots), state (alert on bad current values), or both'
+    description: 'Alert mode: change (detect changes between latest and previous snapshots), state (alert on bad current values), or both. change alone cannot confirm recovery from a sustained outage (no diff on day 2 of an outage looks identical to no diff on a healthy day) - use state or both for availability monitoring. Any other value is a hard configuration error.'
     required: false
     default: 'both'
   

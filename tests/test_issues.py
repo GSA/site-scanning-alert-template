@@ -103,6 +103,35 @@ class TestIssueClientMock(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(mock_request.call_count, MAX_ISSUE_PAGES)
 
+    def test_find_open_issue_skips_null_body_without_crashing(self):
+        """
+        Regression for finding #1: GitHub returns body: null for issues
+        created without a description. `marker in None` must not raise
+        TypeError - it should just be treated as non-matching.
+        """
+        client = IssueClient('owner/repo', 'token')
+
+        issues = [
+            {'number': 1, 'html_url': 'u1', 'body': None},
+            {'number': 2, 'html_url': 'u2', 'body': '<!-- alert-fingerprint: abc123 -->\n\nbody'},
+        ]
+
+        with patch.object(client, '_request', return_value=issues):
+            result = client.find_open_issue(['site-scanning-alert'], '<!-- alert-fingerprint:')
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['number'], 2)
+
+    def test_find_open_issue_all_null_bodies_returns_none(self):
+        client = IssueClient('owner/repo', 'token')
+
+        issues = [{'number': 1, 'html_url': 'u1', 'body': None}]
+
+        with patch.object(client, '_request', return_value=issues):
+            result = client.find_open_issue(['site-scanning-alert'], '<!-- alert-fingerprint:')
+
+        self.assertIsNone(result)
+
     def test_find_open_issue_url_encodes_labels(self):
         """Labels with spaces/commas must not produce a malformed query string."""
         client = IssueClient('owner/repo', 'token')
@@ -242,6 +271,73 @@ class TestAlertLifecycle(unittest.TestCase):
         self.assertEqual(result['issue_url'], existing['html_url'])
         self.assertEqual(len(client.comments), 0)
 
+    def test_clear_without_comment_on_clear_still_marks_body_cleared(self):
+        """
+        Regression for finding #6: comment_on_clear=False must still
+        persist the cleared marker on the issue body. Without it, a later
+        re-fire with a matching fingerprint gets silently swallowed as a
+        no-op instead of posting a re-fire comment.
+        """
+        existing = {
+            'number': 1,
+            'html_url': 'https://github.com/owner/repo/issues/1',
+            'body': embed_fingerprint('old alert body', compute_fingerprint('old alert body'))
+        }
+        client = FakeIssueClient(existing_issue=existing)
+
+        handle_alert_lifecycle(
+            client, 'Possible website issues', 'all clear',
+            ['site-scanning-alert'], is_clear=True, comment_on_clear=False
+        )
+
+        self.assertTrue(has_cleared_marker(client.existing_issue['body']))
+        self.assertEqual(len(client.updates), 1)
+        self.assertEqual(len(client.comments), 0)
+
+        # A second consecutive silent clear must stay a no-op (idempotent -
+        # the has_cleared_marker guard should short-circuit before another
+        # update_issue call).
+        client.updates.clear()
+        second = handle_alert_lifecycle(
+            client, 'Possible website issues', 'all clear',
+            ['site-scanning-alert'], is_clear=True, comment_on_clear=False
+        )
+        self.assertEqual(second['action'], 'no-op')
+        self.assertEqual(len(client.updates), 0)
+
+    def test_silent_clear_then_refire_posts_refire_comment(self):
+        """
+        End-to-end regression for finding #6: an alert clears silently
+        (comment_on_clear=False), then the exact same failure returns.
+        Because the body was still marked cleared, this must be
+        recognized as a re-fire and commented on, not swallowed.
+        """
+        body = 'site is down'
+        existing = {
+            'number': 1,
+            'html_url': 'https://github.com/owner/repo/issues/1',
+            'body': embed_fingerprint(body, compute_fingerprint(body))
+        }
+        client = FakeIssueClient(existing_issue=existing)
+
+        # Silent clear
+        handle_alert_lifecycle(
+            client, 'Possible website issues', 'all clear',
+            ['site-scanning-alert'], is_clear=True, comment_on_clear=False
+        )
+        self.assertEqual(len(client.comments), 0)
+
+        # Same failure returns with an identical fingerprint to what was
+        # open before the clear.
+        result = handle_alert_lifecycle(
+            client, 'Possible website issues', body,
+            ['site-scanning-alert'], is_clear=False, comment_on_clear=False
+        )
+
+        self.assertEqual(result['action'], 'commented')
+        self.assertEqual(len(client.comments), 1)
+        self.assertIn('re-fired', client.comments[0]['comment'])
+
     def test_clear_with_no_existing_issue_is_noop_with_no_url(self):
         client = FakeIssueClient(existing_issue=None)
 
@@ -366,6 +462,20 @@ class TestAlertLifecycle(unittest.TestCase):
             ['site-scanning-alert', 'other-label'], is_clear=False
         )
         self.assertEqual(client.ensure_label_calls, [])
+
+    def test_empty_labels_raises_value_error(self):
+        """
+        Regression for finding #2: handle_alert_lifecycle must never run
+        with an empty labels list - find_open_issue would never find a
+        match, so every run would create a brand-new issue.
+        """
+        client = FakeIssueClient(existing_issue=None)
+
+        with self.assertRaises(ValueError):
+            handle_alert_lifecycle(
+                client, 'Possible website issues', 'something is wrong',
+                [], is_clear=False
+            )
 
 
 class MarkerFilteringFakeClient:

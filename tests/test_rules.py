@@ -186,6 +186,21 @@ class TestParseIgnoreTransitions(unittest.TestCase):
         result = parse_ignore_transitions('')
         self.assertEqual(len(result), 0)
 
+    def test_parse_strips_whitespace(self):
+        """
+        Regression for finding #4: conventionally spaced entries like
+        'live: true -> false' must strip whitespace from each part, or
+        the parsed tuple never matches actual snapshot values.
+        """
+        result = parse_ignore_transitions(' live : true -> false ')
+        self.assertIn(('live', 'true', 'false'), result)
+
+    def test_parse_multiple_strips_whitespace_each(self):
+        result = parse_ignore_transitions('live: true -> false, status_code: 200 -> 503')
+        self.assertEqual(len(result), 2)
+        self.assertIn(('live', 'true', 'false'), result)
+        self.assertIn(('status_code', '200', '503'), result)
+
 
 class TestRenderAlerts(unittest.TestCase):
     

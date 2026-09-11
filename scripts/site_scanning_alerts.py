@@ -31,6 +31,17 @@ from rules import (
 )
 from issues import IssueClient, handle_alert_lifecycle
 
+# Fallback labels used when the `labels` input parses to an empty list
+# (e.g. a workflow override of `labels: ''`). handle_alert_lifecycle
+# requires at least one label - see its docstring - so this must never be
+# passed through empty.
+DEFAULT_LABELS = ['site-scanning-alert']
+
+# Modes accepted by the `mode` input. Anything else must hard-fail before
+# any network I/O, rather than silently skipping both evaluators and
+# falling through to a false "condition cleared".
+VALID_MODES = ('change', 'state', 'both')
+
 
 def load_watchlist(path: str) -> List[str]:
     """Load and parse watchlist file."""
@@ -90,6 +101,28 @@ def main():
     repo = os.getenv('GITHUB_REPOSITORY', '')
     
     try:
+        # Validate mode before any network I/O. An unrecognized mode would
+        # otherwise skip both the change and state evaluators, leaving
+        # all_alerts empty and falsely reporting an active condition as
+        # cleared - see the mode:change handling below for why an empty
+        # all_alerts list is not itself proof of a cleared condition.
+        if mode not in VALID_MODES:
+            msg = f"❌ **Invalid `mode`: `{mode}`**\n\nExpected one of: {', '.join(VALID_MODES)}."
+            print(msg, file=sys.stderr)
+            write_step_summary(msg)
+            sys.exit(1)
+
+        # An empty labels input (e.g. a workflow override of `labels: ''`)
+        # must not be passed through empty - handle_alert_lifecycle can
+        # never find an existing issue without a label to search on, so
+        # every run would create a new one. Fall back to the default and
+        # warn instead of silently flooding the repo.
+        if not labels:
+            labels = list(DEFAULT_LABELS)
+            msg = f"⚠️ **Empty `labels` input - falling back to default labels:** {', '.join(labels)}"
+            print(msg)
+            write_step_summary(msg)
+
         # Load watchlist
         print(f"Loading watchlist from {watchlist_path}...")
         watchlist = load_watchlist(watchlist_path)
@@ -238,6 +271,26 @@ def main():
             # stalled snapshot is not evidence that a previously alerted
             # condition has cleared.
             msg = "ℹ️ **No new information this run**\n\nSnapshot has not rotated, so change detection was skipped, and no state-check findings were found. Skipping issue updates."
+            print(msg)
+            write_step_summary(msg)
+            sys.exit(0)
+
+        if mode == 'change' and not all_alerts:
+            # In change-only mode, zero alerts means "nothing changed
+            # today" - not "the site recovered". A domain stuck at
+            # status_code 503 for a second consecutive day produces no
+            # diff at all, so treating an empty all_alerts as is_clear
+            # here would report "Condition cleared" while the outage is
+            # still active. Only a state check (mode: state or both) can
+            # actually confirm recovery, so skip issue lifecycle entirely
+            # rather than report a false all-clear.
+            msg = (
+                "ℹ️ **No changes detected this run (mode: change)**\n\n"
+                "`mode: change` only detects transitions between snapshots, "
+                "not current health - it cannot confirm recovery, so no "
+                "issue update was made. Use `mode: state` or `mode: both` "
+                "to detect and clear sustained outages."
+            )
             print(msg)
             write_step_summary(msg)
             sys.exit(0)

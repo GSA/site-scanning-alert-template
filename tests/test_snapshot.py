@@ -17,7 +17,7 @@ from snapshot import (
     REQUIRED_COLUMNS,
     SnapshotError
 )
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 class FakeHttpResponse:
@@ -164,7 +164,17 @@ class TestScanDateParsing(unittest.TestCase):
         result = parse_scan_date('2026-09-02')
         self.assertIsNotNone(result)
         self.assertEqual(result.year, 2026)
-    
+
+    def test_parse_date_only_is_tz_aware_utc(self):
+        """
+        Regression for finding #3: date-only strings must be normalized to
+        UTC like the 'T'-containing format, or comparing a date-only
+        datetime against a tz-aware one raises TypeError.
+        """
+        result = parse_scan_date('2026-09-02')
+        self.assertIsNotNone(result.tzinfo)
+        self.assertEqual(result.utcoffset(), timedelta(0))
+
     def test_parse_empty(self):
         result = parse_scan_date('')
         self.assertIsNone(result)
@@ -209,6 +219,22 @@ class TestSnapshotRotation(unittest.TestCase):
         previous = [{'scan_date': same_date}]
         
         self.assertFalse(has_snapshot_rotated(latest, previous))
+
+    def test_rotation_with_mixed_date_formats_does_not_raise(self):
+        """
+        Regression for finding #3: latest using a date-only scan_date and
+        previous using a full ISO timestamp (or vice versa) must not raise
+        TypeError when comparing offset-naive vs offset-aware datetimes.
+        """
+        latest = [{'scan_date': '2026-09-02'}]
+        previous = [{'scan_date': '2026-09-01T10:00:00Z'}]
+
+        self.assertTrue(has_snapshot_rotated(latest, previous))
+
+        latest2 = [{'scan_date': '2026-09-01T10:00:00Z'}]
+        previous2 = [{'scan_date': '2026-09-02'}]
+
+        self.assertFalse(has_snapshot_rotated(latest2, previous2))
 
 
 if __name__ == '__main__':

@@ -8,7 +8,7 @@ to minimize memory use on large files (~45 MB, ~30k rows).
 import csv
 import urllib.request
 import urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set
 import time
 
@@ -202,11 +202,20 @@ def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
         return None
     
     try:
-        # Handle both "2026-09-02T08:11:41.911Z" and "2026-09-02" formats
+        # Handle both "2026-09-02T08:11:41.911Z" and "2026-09-02" formats.
+        # Both are normalized to UTC-aware datetimes - a naive datetime
+        # from the date-only format would otherwise raise TypeError when
+        # compared against the tz-aware datetime parsed from the other
+        # format (e.g. in has_snapshot_rotated).
         if 'T' in scan_date_str:
-            return datetime.fromisoformat(scan_date_str.replace('Z', '+00:00'))
+            parsed = datetime.fromisoformat(scan_date_str.replace('Z', '+00:00'))
         else:
-            return datetime.fromisoformat(scan_date_str)
+            parsed = datetime.fromisoformat(scan_date_str)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed
     except (ValueError, AttributeError):
         return None
 

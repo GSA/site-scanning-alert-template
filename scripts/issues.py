@@ -110,7 +110,10 @@ class IssueClient:
                 if 'pull_request' in issue:
                     continue
 
-                body = issue.get('body', '')
+                # GitHub returns body: null for issues created without a
+                # description, so `issue.get('body', '')` isn't enough -
+                # the key is present with value None.
+                body = issue.get('body') or ''
                 if marker in body:
                     return {
                         'number': issue['number'],
@@ -257,13 +260,27 @@ def handle_alert_lifecycle(
             - action: 'created', 'commented', 'no-op', or 'cleared'
             - issue_url: URL of the issue (if applicable)
             - fingerprint: Computed fingerprint
+
+    Raises:
+        ValueError: If labels is empty. An empty label list means
+            find_open_issue can never locate the issue this same call
+            would create, so every run creates a brand-new issue -
+            callers must supply at least one label (or resolve their
+            configured fallback) before calling this function.
     """
+    if not labels:
+        raise ValueError(
+            "handle_alert_lifecycle requires at least one label; an empty "
+            "labels list means an existing issue can never be found, so "
+            "every run would create a new one."
+        )
+
     # Compute fingerprint of this alert
     fingerprint = compute_fingerprint(body)
     marker = f"<!-- alert-stream: {stream} -->"
 
     # Search for existing open issue from this same stream
-    existing = client.find_open_issue(labels, marker) if labels else None
+    existing = client.find_open_issue(labels, marker)
 
     # Case 1: No active alert conditions
     if is_clear:
@@ -292,6 +309,14 @@ def handle_alert_lifecycle(
                 'fingerprint': fingerprint
             }
         else:
+            # comment_on_clear=False only suppresses the clear comment - it
+            # must still persist the cleared marker on the issue body.
+            # Without this, the body's fingerprint stays pinned to the
+            # pre-clear alert, so if the exact same failure returns later,
+            # its fingerprint matches and the update path (Case 3) wrongly
+            # treats it as an unchanged no-op instead of a re-fire.
+            updated_body = embed_fingerprint(body, fingerprint, stream, cleared=True)
+            client.update_issue(existing['number'], updated_body)
             return {
                 'action': 'no-op',
                 'issue_url': existing['html_url'],
@@ -300,9 +325,8 @@ def handle_alert_lifecycle(
 
     # Case 2: No existing issue - create new
     if not existing:
-        if labels:
-            for label in labels:
-                client.ensure_label(label)
+        for label in labels:
+            client.ensure_label(label)
         body_with_fp = embed_fingerprint(body, fingerprint, stream)
         result = client.create_issue(title, body_with_fp, labels)
         return {
