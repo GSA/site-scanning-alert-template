@@ -166,6 +166,10 @@ def main():
                 )
                 print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
 
+                if fail_on_alert and result['action'] in ('created', 'commented'):
+                    print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
+                    sys.exit(1)
+
             sys.exit(0)
 
         print(f"Snapshot freshness OK (dated {max_date_str})")

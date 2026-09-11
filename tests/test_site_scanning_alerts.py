@@ -134,6 +134,72 @@ class TestStalledRotationStillRunsStateChecks(SiteScanningAlertsTestCase):
         self.assertIn('No new information this run', summary)
 
 
+class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
+    """Stale snapshot alerts must honor fail_on_alert like regular alerts."""
+
+    def test_stale_snapshot_fails_when_staleness_issue_created(self):
+        self._write_watchlist(['test1.gov'])
+
+        stale_rows = [dict(row, scan_date='2000-01-01') for row in LATEST_ROWS]
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            return stale_rows
+
+        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+            return {'action': 'created', 'issue_url': 'https://x/1', 'fingerprint': 'x'}
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_DRY_RUN': 'false',
+            'INPUT_TOKEN': 'fake-token',
+            'INPUT_FAIL_ON_ALERT': 'true',
+            'INPUT_MAX_SNAPSHOT_AGE_DAYS': '3',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
+             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 1)
+        summary = self._read_summary()
+        self.assertIn('Snapshot is stale', summary)
+
+    def test_stale_snapshot_noop_does_not_fail(self):
+        self._write_watchlist(['test1.gov'])
+
+        stale_rows = [dict(row, scan_date='2000-01-01') for row in LATEST_ROWS]
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            return stale_rows
+
+        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+            return {'action': 'no-op', 'issue_url': 'https://x/1', 'fingerprint': 'x'}
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_DRY_RUN': 'false',
+            'INPUT_TOKEN': 'fake-token',
+            'INPUT_FAIL_ON_ALERT': 'true',
+            'INPUT_MAX_SNAPSHOT_AGE_DAYS': '3',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
+             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 0)
+
+
 class TestCustomFieldWarning(SiteScanningAlertsTestCase):
     """Regression for finding #7: unrecognized custom fields must be reported, not silently no-op'd."""
 
