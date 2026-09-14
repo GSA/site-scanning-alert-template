@@ -106,10 +106,25 @@ class TestDocumentation(unittest.TestCase):
         """
         Verify quickstart YAML in README matches actual workflow file.
         
-        Checks action reference and key parameters.
+        Checks action reference and key top-level settings, including
+        indentation-sensitive structure for copy/paste safety.
         """
-        # Extract YAML from README (between ```yaml and ```)
-        yaml_blocks = re.findall(r'```yaml\n(.*?)\n```', self.readme, re.DOTALL)
+        yaml_blocks = []
+        current = []
+        in_yaml = False
+
+        for line in self.readme.split('\n'):
+            stripped = line.strip()
+            if stripped == '```yaml':
+                in_yaml = True
+                current = []
+                continue
+            if in_yaml and stripped == '```':
+                yaml_blocks.append('\n'.join(current))
+                in_yaml = False
+                continue
+            if in_yaml:
+                current.append(line[3:] if line.startswith('   ') else line)
         
         # Find the block that contains "GSA/site-scanning-alert-template"
         quickstart_yaml = None
@@ -125,9 +140,13 @@ class TestDocumentation(unittest.TestCase):
         self.assertIn('uses:', quickstart_yaml)
         self.assertIn('site-scanning-alert-template@', quickstart_yaml)
         
-        # Check permissions
-        if 'permissions:' in quickstart_yaml:
-            self.assertIn('issues: write', quickstart_yaml)
+        # Check top-level workflow keys are copy/pasteable at column 1.
+        self.assertRegex(quickstart_yaml, r'(?m)^permissions:$')
+        self.assertRegex(quickstart_yaml, r'(?m)^  issues: write$')
+        self.assertRegex(quickstart_yaml, r'(?m)^  contents: read$')
+        self.assertRegex(quickstart_yaml, r'(?m)^concurrency:$')
+        self.assertRegex(quickstart_yaml, r'(?m)^  group: site-scanning-alerts-')
+        self.assertRegex(quickstart_yaml, r'(?m)^  cancel-in-progress: false$')
 
 
 class TestWorkflowConcurrency(unittest.TestCase):

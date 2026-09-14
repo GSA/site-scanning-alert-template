@@ -28,11 +28,11 @@ This repo monitors the sites listed in `watchlist.txt` and checks for changes or
        - cron: '30 15 * * *'
      workflow_dispatch:
    
-    permissions:
-      issues: write
-      contents: read
+   permissions:
+     issues: write
+     contents: read
 
-    concurrency:
+   concurrency:
      group: site-scanning-alerts-${{ github.repository }}
      cancel-in-progress: false
    

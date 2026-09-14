@@ -162,7 +162,7 @@ def main():
                 )
                 print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
 
-                if fail_on_alert and result['action'] == 'created':
+                if fail_on_alert:
                     print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
                     sys.exit(1)
 
@@ -303,7 +303,7 @@ def main():
             summary = f"## Site Scanning Alerts\n\n**Action:** {action}\n\n**Issue:** {url}\n\n**Alerts found:** {len(all_alerts)}"
             write_step_summary(summary)
 
-            if fail_on_alert and action == 'created':
+            if fail_on_alert:
                 print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
                 sys.exit(1)
 

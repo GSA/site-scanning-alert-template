@@ -168,7 +168,7 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
         summary = self._read_summary()
         self.assertIn('Snapshot is stale', summary)
 
-    def test_stale_snapshot_noop_does_not_fail(self):
+    def test_stale_snapshot_noop_still_fails(self):
         self._write_watchlist(['test1.gov'])
 
         stale_rows = [dict(row, scan_date='2000-01-01') for row in LATEST_ROWS]
@@ -196,7 +196,7 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
             with self.assertRaises(SystemExit) as cm:
                 ssa.main()
 
-        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(cm.exception.code, 1)
 
 
 class TestCustomFieldWarning(SiteScanningAlertsTestCase):
@@ -304,14 +304,10 @@ class TestInvalidModeRejected(SiteScanningAlertsTestCase):
         self.assertIn('bogus', summary)
 
     def test_valid_modes_are_accepted(self):
+        self._write_watchlist(['test1.gov'])
+
         for mode in ('change', 'state', 'both'):
             with self.subTest(mode=mode):
-                wl = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-                wl.write('test1.gov\n')
-                wl.close()
-                summary = tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False)
-                summary.close()
-
                 def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
                     if 'previous' in url:
                         return PREVIOUS_ROWS
@@ -319,18 +315,14 @@ class TestInvalidModeRejected(SiteScanningAlertsTestCase):
 
                 env = dict(BASE_ENV)
                 env['INPUT_MODE'] = mode
-                env['INPUT_WATCHLIST'] = wl.name
-                env['GITHUB_STEP_SUMMARY'] = summary.name
+                env['INPUT_WATCHLIST'] = self.watchlist_file.name
+                env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
 
-                try:
-                    with patch.dict(os.environ, env, clear=True), \
-                         patch.object(ssa, 'download_snapshot', side_effect=fake_download):
-                        with self.assertRaises(SystemExit) as cm:
-                            ssa.main()
-                    self.assertEqual(cm.exception.code, 0)
-                finally:
-                    os.unlink(wl.name)
-                    os.unlink(summary.name)
+                with patch.dict(os.environ, env, clear=True), \
+                     patch.object(ssa, 'download_snapshot', side_effect=fake_download):
+                    with self.assertRaises(SystemExit) as cm:
+                        ssa.main()
+                self.assertEqual(cm.exception.code, 0)
 
 
 class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
@@ -439,6 +431,36 @@ class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
 
         self.assertEqual(cm.exception.code, 0)
         self.assertIn('alerts', calls)
+
+    def test_fail_on_alert_fails_when_existing_alert_is_noop(self):
+        self._write_watchlist(['sub.test4.gov'])  # status_code 200 -> 503
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            if 'previous' in url:
+                return PREVIOUS_ROWS
+            return LATEST_ROWS
+
+        def fake_file_alert(client, title, body, labels, stream='alerts'):
+            return {'action': 'no-op', 'issue_url': 'https://x/1'}
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_MODE': 'change',
+            'INPUT_DRY_RUN': 'false',
+            'INPUT_TOKEN': 'fake-token',
+            'INPUT_FAIL_ON_ALERT': 'true',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
+             patch.object(ssa, 'file_alert', side_effect=fake_file_alert):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 1)
 
 
 if __name__ == '__main__':
