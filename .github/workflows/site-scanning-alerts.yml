@@ -23,8 +23,7 @@ permissions:
 # find_open_issue + create_issue is a non-atomic find-then-create
 # sequence, so two concurrent runs can each observe no matching issue and
 # both create one. cancel-in-progress is false so the second run queues
-# rather than being killed mid-lifecycle, which could leave an issue
-# commented on without its body's fingerprint patched.
+# rather than being killed mid-run.
 concurrency:
   group: site-scanning-alerts-${{ github.repository }}
   cancel-in-progress: false

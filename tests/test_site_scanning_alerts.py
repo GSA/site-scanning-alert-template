@@ -5,8 +5,8 @@ Tests for site_scanning_alerts.py (main entrypoint).
 main() previously had zero test coverage - every guard, exit path, and mode
 dispatch lived only in manual dry-run testing. These tests drive main()
 through its real INPUT_* env-var interface, stubbing out network access
-(download_snapshot) and, where relevant, the GitHub issue lifecycle
-(handle_alert_lifecycle), and assert on GITHUB_STEP_SUMMARY output.
+(download_snapshot) and, where relevant, issue filing (file_alert), and
+assert on GITHUB_STEP_SUMMARY output.
 """
 import unittest
 import os
@@ -96,8 +96,7 @@ class TestStalledRotationStillRunsStateChecks(SiteScanningAlertsTestCase):
     def test_no_alerts_touches_no_issue_lifecycle(self):
         """
         A stalled rotation with zero state findings must exit without ever
-        invoking the 'alerts' stream lifecycle - a stalled snapshot is not
-        evidence a condition cleared.
+        invoking file_alert for the 'alerts' stream.
         """
         self._write_watchlist(['test1.gov'])  # status_code 200, live true - nothing to alert on
 
@@ -106,9 +105,9 @@ class TestStalledRotationStillRunsStateChecks(SiteScanningAlertsTestCase):
 
         calls = []
 
-        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts'):
             calls.append(stream)
-            return {'action': 'no-op', 'issue_url': None, 'fingerprint': 'x'}
+            return {'action': 'no-op', 'issue_url': None}
 
         env = {
             'INPUT_DRY_RUN': 'false',
@@ -122,13 +121,13 @@ class TestStalledRotationStillRunsStateChecks(SiteScanningAlertsTestCase):
         with patch.dict(os.environ, full_env, clear=True), \
              patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
              patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
-             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+             patch.object(ssa, 'file_alert', side_effect=fake_file_alert):
             with self.assertRaises(SystemExit) as cm:
                 ssa.main()
 
         self.assertEqual(cm.exception.code, 0)
-        # The staleness-clear check runs on every fresh run (harmless no-op
-        # here), but the 'alerts' stream must never be touched.
+        # The 'alerts' stream must never be touched on a stalled run with
+        # no findings.
         self.assertNotIn('alerts', calls)
         summary = self._read_summary()
         self.assertIn('No new information this run', summary)
@@ -145,8 +144,8 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
         def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
             return stale_rows
 
-        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
-            return {'action': 'created', 'issue_url': 'https://x/1', 'fingerprint': 'x'}
+        def fake_file_alert(client, title, body, labels, stream='alerts'):
+            return {'action': 'created', 'issue_url': 'https://x/1'}
 
         env = dict(BASE_ENV)
         env.update({
@@ -161,7 +160,7 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
         with patch.dict(os.environ, env, clear=True), \
              patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
              patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
-             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+             patch.object(ssa, 'file_alert', side_effect=fake_file_alert):
             with self.assertRaises(SystemExit) as cm:
                 ssa.main()
 
@@ -177,8 +176,8 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
         def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
             return stale_rows
 
-        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
-            return {'action': 'no-op', 'issue_url': 'https://x/1', 'fingerprint': 'x'}
+        def fake_file_alert(client, title, body, labels, stream='alerts'):
+            return {'action': 'no-op', 'issue_url': 'https://x/1'}
 
         env = dict(BASE_ENV)
         env.update({
@@ -193,7 +192,7 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
         with patch.dict(os.environ, env, clear=True), \
              patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
              patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
-             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+             patch.object(ssa, 'file_alert', side_effect=fake_file_alert):
             with self.assertRaises(SystemExit) as cm:
                 ssa.main()
 
@@ -261,9 +260,9 @@ class TestEmptyLabelsFallback(SiteScanningAlertsTestCase):
 
         captured = {}
 
-        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts'):
             captured[stream] = labels
-            return {'action': 'created', 'issue_url': 'https://x/1', 'fingerprint': 'x'}
+            return {'action': 'created', 'issue_url': 'https://x/1'}
 
         env = dict(BASE_ENV)
         env.update({
@@ -277,7 +276,7 @@ class TestEmptyLabelsFallback(SiteScanningAlertsTestCase):
         with patch.dict(os.environ, env, clear=True), \
              patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
              patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
-             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+             patch.object(ssa, 'file_alert', side_effect=fake_file_alert):
             with self.assertRaises(SystemExit) as cm:
                 ssa.main()
 
@@ -334,14 +333,13 @@ class TestInvalidModeRejected(SiteScanningAlertsTestCase):
                     os.unlink(summary.name)
 
 
-class TestChangeModeCannotConfirmRecovery(SiteScanningAlertsTestCase):
+class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
     """
-    Regression for finding #5: mode=change with zero detected changes must
-    not report the alert condition as cleared - the absence of a diff is
-    not evidence of recovery, only a state check can establish that.
+    With no rolling comments, there's no "clear" action to file - zero
+    findings just means nothing gets filed, regardless of mode.
     """
 
-    def test_change_mode_with_no_diff_skips_alert_lifecycle(self):
+    def test_change_mode_with_no_diff_files_nothing(self):
         self._write_watchlist(['test1.gov'])  # identical in latest/previous fixtures
 
         def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
@@ -351,9 +349,9 @@ class TestChangeModeCannotConfirmRecovery(SiteScanningAlertsTestCase):
 
         calls = []
 
-        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts'):
             calls.append(stream)
-            return {'action': 'no-op', 'issue_url': None, 'fingerprint': 'x'}
+            return {'action': 'no-op', 'issue_url': None}
 
         env = dict(BASE_ENV)
         env.update({
@@ -367,17 +365,16 @@ class TestChangeModeCannotConfirmRecovery(SiteScanningAlertsTestCase):
         with patch.dict(os.environ, env, clear=True), \
              patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
              patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
-             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+             patch.object(ssa, 'file_alert', side_effect=fake_file_alert):
             with self.assertRaises(SystemExit) as cm:
                 ssa.main()
 
         self.assertEqual(cm.exception.code, 0)
         self.assertNotIn('alerts', calls)
         summary = self._read_summary()
-        self.assertIn('cannot confirm recovery', summary.lower())
+        self.assertIn('no alerts this run', summary.lower())
 
-    def test_both_mode_with_no_diff_still_clears_via_state_check(self):
-        """Guard against over-correcting: `both` mode must still clear normally."""
+    def test_both_mode_with_no_diff_and_no_state_findings_files_nothing(self):
         self._write_watchlist(['test1.gov'])
 
         def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
@@ -387,9 +384,9 @@ class TestChangeModeCannotConfirmRecovery(SiteScanningAlertsTestCase):
 
         calls = []
 
-        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
-            calls.append((stream, is_clear))
-            return {'action': 'no-op', 'issue_url': None, 'fingerprint': 'x'}
+        def fake_file_alert(client, title, body, labels, stream='alerts'):
+            calls.append(stream)
+            return {'action': 'no-op', 'issue_url': None}
 
         env = dict(BASE_ENV)
         env.update({
@@ -403,12 +400,12 @@ class TestChangeModeCannotConfirmRecovery(SiteScanningAlertsTestCase):
         with patch.dict(os.environ, env, clear=True), \
              patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
              patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
-             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+             patch.object(ssa, 'file_alert', side_effect=fake_file_alert):
             with self.assertRaises(SystemExit) as cm:
                 ssa.main()
 
         self.assertEqual(cm.exception.code, 0)
-        self.assertIn(('alerts', True), calls)
+        self.assertNotIn('alerts', calls)
 
     def test_change_mode_still_alerts_when_changes_exist(self):
         self._write_watchlist(['sub.test4.gov'])  # status_code 200 -> 503
@@ -420,9 +417,9 @@ class TestChangeModeCannotConfirmRecovery(SiteScanningAlertsTestCase):
 
         calls = []
 
-        def fake_lifecycle(client, title, body, labels, is_clear, comment_on_clear=True, stream='alerts'):
-            calls.append((stream, is_clear))
-            return {'action': 'created', 'issue_url': 'https://x/1', 'fingerprint': 'x'}
+        def fake_file_alert(client, title, body, labels, stream='alerts'):
+            calls.append(stream)
+            return {'action': 'created', 'issue_url': 'https://x/1'}
 
         env = dict(BASE_ENV)
         env.update({
@@ -436,12 +433,12 @@ class TestChangeModeCannotConfirmRecovery(SiteScanningAlertsTestCase):
         with patch.dict(os.environ, env, clear=True), \
              patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo'}), \
              patch.object(ssa, 'download_snapshot', side_effect=fake_download), \
-             patch.object(ssa, 'handle_alert_lifecycle', side_effect=fake_lifecycle):
+             patch.object(ssa, 'file_alert', side_effect=fake_file_alert):
             with self.assertRaises(SystemExit) as cm:
                 ssa.main()
 
         self.assertEqual(cm.exception.code, 0)
-        self.assertIn(('alerts', False), calls)
+        self.assertIn('alerts', calls)
 
 
 if __name__ == '__main__':

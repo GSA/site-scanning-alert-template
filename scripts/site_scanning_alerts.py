@@ -29,12 +29,12 @@ from rules import (
     parse_ignore_transitions,
     Alert
 )
-from issues import IssueClient, handle_alert_lifecycle
+from issues import IssueClient, file_alert
 
 # Fallback labels used when the `labels` input parses to an empty list
-# (e.g. a workflow override of `labels: ''`). handle_alert_lifecycle
-# requires at least one label - see its docstring - so this must never be
-# passed through empty.
+# (e.g. a workflow override of `labels: ''`). file_alert requires at
+# least one label - see its docstring - so this must never be passed
+# through empty.
 DEFAULT_LABELS = ['site-scanning-alert']
 
 # Modes accepted by the `mode` input. Anything else must hard-fail before
@@ -96,16 +96,14 @@ def main():
     token = os.getenv('INPUT_TOKEN', '')
     fail_on_alert = os.getenv('INPUT_FAIL_ON_ALERT', 'false').lower() == 'true'
     dry_run = os.getenv('INPUT_DRY_RUN', 'false').lower() == 'true'
-    comment_on_clear = os.getenv('INPUT_COMMENT_ON_CLEAR', 'true').lower() == 'true'
     
     repo = os.getenv('GITHUB_REPOSITORY', '')
     
     try:
         # Validate mode before any network I/O. An unrecognized mode would
-        # otherwise skip both the change and state evaluators, leaving
-        # all_alerts empty and falsely reporting an active condition as
-        # cleared - see the mode:change handling below for why an empty
-        # all_alerts list is not itself proof of a cleared condition.
+        # otherwise skip both the change and state evaluators, silently
+        # leaving all_alerts empty instead of hard-failing on a
+        # misconfigured workflow.
         if mode not in VALID_MODES:
             msg = f"❌ **Invalid `mode`: `{mode}`**\n\nExpected one of: {', '.join(VALID_MODES)}."
             print(msg, file=sys.stderr)
@@ -113,10 +111,10 @@ def main():
             sys.exit(1)
 
         # An empty labels input (e.g. a workflow override of `labels: ''`)
-        # must not be passed through empty - handle_alert_lifecycle can
-        # never find an existing issue without a label to search on, so
-        # every run would create a new one. Fall back to the default and
-        # warn instead of silently flooding the repo.
+        # must not be passed through empty - file_alert can never find an
+        # existing issue without a label to search on, so every run would
+        # create a new one. Fall back to the default and warn instead of
+        # silently flooding the repo.
         if not labels:
             labels = list(DEFAULT_LABELS)
             msg = f"⚠️ **Empty `labels` input - falling back to default labels:** {', '.join(labels)}"
@@ -155,18 +153,16 @@ def main():
             write_step_summary(msg)
 
             if client:
-                result = handle_alert_lifecycle(
+                result = file_alert(
                     client,
                     "Site Scanning data is stale",
                     msg,
                     labels,
-                    is_clear=False,
-                    comment_on_clear=comment_on_clear,
                     stream='staleness'
                 )
                 print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
 
-                if fail_on_alert and result['action'] in ('created', 'commented'):
+                if fail_on_alert and result['action'] == 'created':
                     print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
                     sys.exit(1)
 
@@ -174,22 +170,9 @@ def main():
 
         print(f"Snapshot freshness OK (dated {max_date_str})")
 
-        if client:
-            # Data has refreshed - clear any staleness issue left open from a
-            # prior run so it doesn't sit open forever once the upstream
-            # scanning engine recovers.
-            clear_msg = f"✅ **Data has refreshed**\n\nLatest snapshot is now dated {max_date_str}."
-            staleness_result = handle_alert_lifecycle(
-                client,
-                "Site Scanning data is stale",
-                clear_msg,
-                labels,
-                is_clear=True,
-                comment_on_clear=comment_on_clear,
-                stream='staleness'
-            )
-            if staleness_result['action'] != 'no-op':
-                print(f"Staleness clear: {staleness_result['action']} - {staleness_result.get('issue_url', 'N/A')}")
+        # Recovery from staleness is reported in the step summary only -
+        # there's no issue to clear or comment on, since staleness alerts
+        # are filed (not tracked) per finding.
 
         # Filter to watchlist
         filtered_latest = filter_to_watchlist(latest_rows, watchlist)
@@ -271,30 +254,18 @@ def main():
 
         if rotation_stalled and not all_alerts:
             # No fresh diff and no active state findings - there's nothing
-            # new to report. Crucially, don't touch issue lifecycle: a
-            # stalled snapshot is not evidence that a previously alerted
-            # condition has cleared.
-            msg = "ℹ️ **No new information this run**\n\nSnapshot has not rotated, so change detection was skipped, and no state-check findings were found. Skipping issue updates."
+            # new to report, and nothing new to file.
+            msg = "ℹ️ **No new information this run**\n\nSnapshot has not rotated, so change detection was skipped, and no state-check findings were found. Skipping issue filing."
             print(msg)
             write_step_summary(msg)
             sys.exit(0)
 
-        if mode == 'change' and not all_alerts:
-            # In change-only mode, zero alerts means "nothing changed
-            # today" - not "the site recovered". A domain stuck at
-            # status_code 503 for a second consecutive day produces no
-            # diff at all, so treating an empty all_alerts as is_clear
-            # here would report "Condition cleared" while the outage is
-            # still active. Only a state check (mode: state or both) can
-            # actually confirm recovery, so skip issue lifecycle entirely
-            # rather than report a false all-clear.
-            msg = (
-                "ℹ️ **No changes detected this run (mode: change)**\n\n"
-                "`mode: change` only detects transitions between snapshots, "
-                "not current health - it cannot confirm recovery, so no "
-                "issue update was made. Use `mode: state` or `mode: both` "
-                "to detect and clear sustained outages."
-            )
+        if not all_alerts:
+            # Nothing to report. In change-only mode this just means
+            # "nothing changed today" (not "the site recovered" - a
+            # sustained outage produces no diff on day 2), but either way
+            # there are no findings to file an issue for.
+            msg = "✅ **No alerts this run**\n\nAll monitored sites are operating as expected (or, in `mode: change`, nothing changed since the last snapshot)."
             print(msg)
             write_step_summary(msg)
             sys.exit(0)
@@ -315,26 +286,24 @@ def main():
                 print("ERROR: token and GITHUB_REPOSITORY must be set for non-dry-run mode")
                 sys.exit(1)
 
-            result = handle_alert_lifecycle(
+            result = file_alert(
                 client,
                 issue_title,
                 body,
                 labels,
-                is_clear=(len(all_alerts) == 0),
-                comment_on_clear=comment_on_clear,
                 stream='alerts'
             )
 
             action = result['action']
             url = result.get('issue_url', 'N/A')
 
-            print(f"\nIssue lifecycle: {action}")
+            print(f"\nIssue filing: {action}")
             print(f"Issue URL: {url}")
 
             summary = f"## Site Scanning Alerts\n\n**Action:** {action}\n\n**Issue:** {url}\n\n**Alerts found:** {len(all_alerts)}"
             write_step_summary(summary)
 
-            if fail_on_alert and len(all_alerts) > 0 and action in ('created', 'commented'):
+            if fail_on_alert and action == 'created':
                 print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
                 sys.exit(1)
 

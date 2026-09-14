@@ -1,31 +1,36 @@
 #!/usr/bin/env python3
 """
-GitHub issue lifecycle management for Site Scanning alerts.
+GitHub issue filing for Site Scanning alerts.
 
-Implements fingerprinted rolling issues: search for an open issue with the label,
-create if none exists, comment if fingerprint changed, no-op if identical.
+MVP approach: file a new issue for each distinct set of findings; skip
+filing if an open issue already carries the identical fingerprint. No
+rolling comments, no auto-close, no "condition cleared" tracking - a
+sustained, unchanged outage produces exactly one open issue, and a
+changed or new outage produces another. Triage and closing are manual.
+This trades issue-tab tidiness for a much simpler, harder-to-break
+lifecycle; revisit if the noise becomes a real problem.
 """
 import hashlib
 import json
 import urllib.request
 import urllib.error
 import urllib.parse
-from typing import Any, List, Optional, Dict
+from typing import List, Optional, Dict
 
 # Cap on pages walked in find_open_issue - protects against runaway API
 # consumption in repos with a very large number of open issues.
 MAX_ISSUE_PAGES = 5
 
-CLEARED_MARKER = '<!-- alert-cleared -->'
+MARKER_PREFIX = '<!-- site-scanning-alert:'
 
 
 class IssueClient:
     """
-    GitHub issue client for alert lifecycle.
-    
+    GitHub issue client for alert filing.
+
     Constructor-injectable for testability (no global state).
     """
-    
+
     def __init__(self, repo: str, token: str):
         """
         Args:
@@ -35,7 +40,7 @@ class IssueClient:
         self.repo = repo
         self.token = token
         self.base_url = f"https://api.github.com/repos/{repo}"
-    
+
     def _request(
         self,
         method: str,
@@ -49,10 +54,10 @@ class IssueClient:
             'Accept': 'application/vnd.github+json',
             'Content-Type': 'application/json'
         }
-        
+
         req_data = json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
-        
+
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
                 return json.loads(response.read().decode())
@@ -61,7 +66,7 @@ class IssueClient:
             raise RuntimeError(f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}")
         except urllib.error.URLError as e:
             raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}")
-    
+
     def ensure_label(self, label: str, color: str = '0366d6', description: str = '') -> None:
         """Create label if it doesn't exist (idempotent)."""
         # Check existence via GET /labels/:name (404 = doesn't exist)
@@ -132,7 +137,7 @@ class IssueClient:
                     "treating as not found. Consider closing stale open issues."
                 )
                 return None
-    
+
     def create_issue(
         self,
         title: str,
@@ -141,7 +146,7 @@ class IssueClient:
     ) -> Dict:
         """
         Create a new issue.
-        
+
         Returns:
             Issue dict with keys: number, html_url
         """
@@ -150,29 +155,19 @@ class IssueClient:
             'body': body,
             'labels': labels
         }
-        
+
         result = self._request('POST', '/issues', data)
         return {
             'number': result['number'],
             'html_url': result['html_url']
         }
-    
-    def comment_on_issue(self, issue_number: int, comment: str) -> None:
-        """Add a comment to an existing issue."""
-        self._request('POST', f"/issues/{issue_number}/comments", {'body': comment})
-
-    def update_issue(self, issue_number: int, body: str) -> None:
-        """Overwrite an existing issue's body (PATCH /issues/:number)."""
-        self._request('PATCH', f"/issues/{issue_number}", {'body': body})
 
 
 def strip_markers(body: str) -> str:
-    """Remove alert-fingerprint, alert-stream, and alert-cleared marker lines."""
+    """Remove alert marker lines."""
     lines = [
         line for line in body.split('\n')
-        if not line.strip().startswith('<!-- alert-fingerprint:')
-        and not line.strip().startswith('<!-- alert-stream:')
-        and not line.strip().startswith(CLEARED_MARKER)
+        if not line.strip().startswith(MARKER_PREFIX)
     ]
     return '\n'.join(lines)
 
@@ -181,185 +176,71 @@ def compute_fingerprint(body: str) -> str:
     """
     Compute stable fingerprint of an alert body.
 
-    Strips the marker comments themselves and non-semantic whitespace before hashing.
+    Strips the marker comment itself and non-semantic whitespace before hashing.
     """
     normalized = strip_markers(body).strip()
     return hashlib.sha256(normalized.encode()).hexdigest()[:12]
 
 
-def embed_fingerprint(
-    body: str,
-    fingerprint: str,
-    stream: str = 'alerts',
-    cleared: bool = False
-) -> str:
+def alert_marker(stream: str, fingerprint: str) -> str:
     """
-    Embed fingerprint and stream markers as HTML comments in body.
+    Build the marker embedded in a filed issue's body.
 
-    The stream marker (e.g. 'alerts' vs 'staleness') lets find_open_issue
-    distinguish issues filed by different alert kinds that share the same
-    labels, so one kind never mistakes another's issue for its own.
-
-    When cleared=True, also embeds the alert-cleared marker, which signals
-    that the last run already posted a "Condition cleared" comment for the
-    current state, so a subsequent healthy run can recognize this as a
-    no-op rather than commenting again.
+    Combines the stream (e.g. 'alerts' vs 'staleness') and the findings'
+    fingerprint into one marker, so a single substring search on
+    find_open_issue answers "is this exact finding, from this stream,
+    already open?" - no separate stream/fingerprint bookkeeping needed.
     """
-    stream_marker = f"<!-- alert-stream: {stream} -->"
-    fp_marker = f"<!-- alert-fingerprint: {fingerprint} -->"
-    markers = [stream_marker, fp_marker]
-    if cleared:
-        markers.append(CLEARED_MARKER)
-    return '\n'.join(markers) + f"\n\n{body}"
+    return f"{MARKER_PREFIX} {stream}:{fingerprint} -->"
 
 
-def extract_fingerprint(body: str) -> Optional[str]:
-    """Extract fingerprint from body if present."""
-    for line in body.split('\n'):
-        if line.strip().startswith('<!-- alert-fingerprint:'):
-            # Extract the hash between : and -->
-            try:
-                return line.split(':', 1)[1].split('-->')[0].strip()
-            except IndexError:
-                return None
-    return None
-
-
-def has_cleared_marker(body: str) -> bool:
-    """Check whether the body has already been marked as cleared."""
-    return any(line.strip().startswith(CLEARED_MARKER) for line in body.split('\n'))
-
-
-def handle_alert_lifecycle(
+def file_alert(
     client: IssueClient,
     title: str,
     body: str,
     labels: List[str],
-    is_clear: bool,
-    comment_on_clear: bool = True,
     stream: str = 'alerts'
-) -> Dict[str, Any]:
+) -> Dict[str, Optional[str]]:
     """
-    Manage full alert issue lifecycle with fingerprinting.
+    File a new issue for the given findings, unless an open issue already
+    carries the identical fingerprint for this stream.
 
     Args:
         client: IssueClient instance
         title: Issue title
-        body: Alert body (without fingerprint marker)
+        body: Alert body (without marker)
         labels: List of label names to apply
-        is_clear: True if the caller has determined no alert conditions are
-            currently active (e.g. zero alerts found this run)
-        comment_on_clear: If True, comment when condition clears
         stream: Distinguishes alert kinds that share the same labels (e.g.
             'alerts' vs 'staleness'), so find_open_issue only matches an
-            issue filed by this same stream and never cross-contaminates
-            with another stream's issue.
+            issue filed by this same stream.
 
     Returns:
         Dict with keys:
-            - action: 'created', 'commented', 'no-op', or 'cleared'
+            - action: 'created' or 'no-op'
             - issue_url: URL of the issue (if applicable)
-            - fingerprint: Computed fingerprint
 
     Raises:
         ValueError: If labels is empty. An empty label list means
-            find_open_issue can never locate the issue this same call
+            find_open_issue can never locate an issue this same call
             would create, so every run creates a brand-new issue -
             callers must supply at least one label (or resolve their
             configured fallback) before calling this function.
     """
     if not labels:
         raise ValueError(
-            "handle_alert_lifecycle requires at least one label; an empty "
-            "labels list means an existing issue can never be found, so "
-            "every run would create a new one."
+            "file_alert requires at least one label; an empty labels "
+            "list means an existing issue can never be found, so every "
+            "run would create a new one."
         )
 
-    # Compute fingerprint of this alert
-    fingerprint = compute_fingerprint(body)
-    marker = f"<!-- alert-stream: {stream} -->"
-
-    # Search for existing open issue from this same stream
+    marker = alert_marker(stream, compute_fingerprint(body))
     existing = client.find_open_issue(labels, marker)
 
-    # Case 1: No active alert conditions
-    if is_clear:
-        if not existing:
-            return {'action': 'no-op', 'issue_url': None, 'fingerprint': fingerprint}
+    if existing:
+        return {'action': 'no-op', 'issue_url': existing['html_url']}
 
-        if has_cleared_marker(existing['body']):
-            # Already flagged as cleared on a previous run - nothing new to say.
-            return {
-                'action': 'no-op',
-                'issue_url': existing['html_url'],
-                'fingerprint': fingerprint
-            }
+    for label in labels:
+        client.ensure_label(label)
 
-        if comment_on_clear:
-            # Condition cleared - comment once, then flag the issue body so
-            # subsequent healthy runs recognize it's already been reported
-            # and don't repeat the comment. The issue itself stays open.
-            comment = "✅ **Condition cleared**\n\n" + body
-            client.comment_on_issue(existing['number'], comment)
-            updated_body = embed_fingerprint(body, fingerprint, stream, cleared=True)
-            client.update_issue(existing['number'], updated_body)
-            return {
-                'action': 'cleared',
-                'issue_url': existing['html_url'],
-                'fingerprint': fingerprint
-            }
-        else:
-            # comment_on_clear=False only suppresses the clear comment - it
-            # must still persist the cleared marker on the issue body.
-            # Without this, the body's fingerprint stays pinned to the
-            # pre-clear alert, so if the exact same failure returns later,
-            # its fingerprint matches and the update path (Case 3) wrongly
-            # treats it as an unchanged no-op instead of a re-fire.
-            updated_body = embed_fingerprint(body, fingerprint, stream, cleared=True)
-            client.update_issue(existing['number'], updated_body)
-            return {
-                'action': 'no-op',
-                'issue_url': existing['html_url'],
-                'fingerprint': fingerprint
-            }
-
-    # Case 2: No existing issue - create new
-    if not existing:
-        for label in labels:
-            client.ensure_label(label)
-        body_with_fp = embed_fingerprint(body, fingerprint, stream)
-        result = client.create_issue(title, body_with_fp, labels)
-        return {
-            'action': 'created',
-            'issue_url': result['html_url'],
-            'fingerprint': fingerprint
-        }
-
-    # Case 3: Existing issue - compare fingerprints. A cleared marker forces
-    # an update even when the fingerprint happens to match what was open
-    # before the clear - otherwise an identical alert re-firing right after
-    # a clear would be silently swallowed as a no-op.
-    existing_fp = extract_fingerprint(existing['body'])
-    was_cleared = has_cleared_marker(existing['body'])
-
-    if existing_fp == fingerprint and not was_cleared:
-        # Identical alert - no-op (idempotent re-runs)
-        return {
-            'action': 'no-op',
-            'issue_url': existing['html_url'],
-            'fingerprint': fingerprint
-        }
-    else:
-        # Changed alert (or a re-fire after a clear) - comment with the new
-        # findings, then patch the issue body so the next run compares
-        # against the current fingerprint instead of the original one.
-        header = "❗ **Alert re-fired**" if was_cleared else "🔄 **Alert updated**"
-        comment = f"{header}\n\n{body}"
-        client.comment_on_issue(existing['number'], comment)
-        updated_body = embed_fingerprint(body, fingerprint, stream)
-        client.update_issue(existing['number'], updated_body)
-        return {
-            'action': 'commented',
-            'issue_url': existing['html_url'],
-            'fingerprint': fingerprint
-        }
+    result = client.create_issue(title, f"{marker}\n\n{body}", labels)
+    return {'action': 'created', 'issue_url': result['html_url']}
