@@ -106,10 +106,25 @@ class TestDocumentation(unittest.TestCase):
         """
         Verify quickstart YAML in README matches actual workflow file.
         
-        Checks action reference and key parameters.
+        Checks action reference and key top-level settings, including
+        indentation-sensitive structure for copy/paste safety.
         """
-        # Extract YAML from README (between ```yaml and ```)
-        yaml_blocks = re.findall(r'```yaml\n(.*?)\n```', self.readme, re.DOTALL)
+        yaml_blocks = []
+        current = []
+        in_yaml = False
+
+        for line in self.readme.split('\n'):
+            stripped = line.strip()
+            if stripped == '```yaml':
+                in_yaml = True
+                current = []
+                continue
+            if in_yaml and stripped == '```':
+                yaml_blocks.append('\n'.join(current))
+                in_yaml = False
+                continue
+            if in_yaml:
+                current.append(line[3:] if line.startswith('   ') else line)
         
         # Find the block that contains "GSA/site-scanning-alert-template"
         quickstart_yaml = None
@@ -125,9 +140,44 @@ class TestDocumentation(unittest.TestCase):
         self.assertIn('uses:', quickstart_yaml)
         self.assertIn('site-scanning-alert-template@', quickstart_yaml)
         
-        # Check permissions
-        if 'permissions:' in quickstart_yaml:
-            self.assertIn('issues: write', quickstart_yaml)
+        # Check top-level workflow keys are copy/pasteable at column 1.
+        self.assertRegex(quickstart_yaml, r'(?m)^permissions:$')
+        self.assertRegex(quickstart_yaml, r'(?m)^  issues: write$')
+        self.assertRegex(quickstart_yaml, r'(?m)^  contents: read$')
+        self.assertRegex(quickstart_yaml, r'(?m)^concurrency:$')
+        self.assertRegex(quickstart_yaml, r'(?m)^  group: site-scanning-alerts-')
+        self.assertRegex(quickstart_yaml, r'(?m)^  cancel-in-progress: false$')
+
+
+class TestWorkflowConcurrency(unittest.TestCase):
+    """
+    Regression for finding #8: without a concurrency guard, an overlapping
+    scheduled run and a manually dispatched run can both observe no
+    matching open issue and each create one (find_open_issue is
+    non-atomic with create_issue). Serializing runs at the workflow level
+    is the practical fix, since the GitHub issues API has no
+    create-if-absent primitive.
+    """
+
+    def setUp(self):
+        self.repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        workflow_path = os.path.join(
+            self.repo_root, '.github', 'workflows', 'site-scanning-alerts.yml'
+        )
+        with open(workflow_path, 'r') as f:
+            self.workflow = f.read()
+
+    def test_workflow_has_concurrency_guard(self):
+        self.assertIn('concurrency:', self.workflow)
+        self.assertIn('cancel-in-progress: false', self.workflow)
+
+    def test_concurrency_guard_precedes_jobs(self):
+        # Concurrency must be a top-level key (applies to the whole
+        # workflow), not nested under a single job, so scheduled and
+        # workflow_dispatch runs of this same workflow always serialize.
+        concurrency_idx = self.workflow.index('concurrency:')
+        jobs_idx = self.workflow.index('\njobs:')
+        self.assertLess(concurrency_idx, jobs_idx)
 
 
 class TestExternalLinks(unittest.TestCase):

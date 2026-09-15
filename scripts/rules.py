@@ -148,6 +148,47 @@ def evaluate_state_check(
     return alerts
 
 
+def dedupe_alerts(alerts: List[Alert]) -> List[Alert]:
+    """
+    Collapse duplicate alerts for the same (domain, field) in `both` mode.
+
+    A failing site typically triggers both a change alert (e.g.
+    "status_code: 200 -> 503") and a state alert (e.g. "status_code: 503")
+    for the same underlying condition. Reporting both doubles the noise and
+    double-counts against max_changes, so when a change and a state alert
+    share a domain/field, the change alert wins - it carries the old value
+    too, which is strictly more diagnostic context than the state value
+    alone. Corpus alerts ("newly/no longer in snapshot") have no field, so
+    they're keyed on domain + message instead and never collide with
+    change/state alerts.
+
+    Order-preserving and independent of whether change or state alerts were
+    appended first.
+    """
+    change_keys = {
+        (a.domain, a.field) for a in alerts if a.alert_type == 'change'
+    }
+
+    deduped = []
+    seen = set()
+    for alert in alerts:
+        if alert.alert_type == 'corpus':
+            key = (alert.domain, 'corpus', alert.new_value)
+        else:
+            key = (alert.domain, alert.field)
+
+        if alert.alert_type == 'state' and key in change_keys:
+            # A change alert for this domain/field already covers this.
+            continue
+
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(alert)
+
+    return deduped
+
+
 def group_alerts_by_domain(alerts: List[Alert]) -> Dict[str, List[Alert]]:
     """Group alerts by initial_domain for rendering."""
     grouped = defaultdict(list)
@@ -246,7 +287,7 @@ def parse_ignore_transitions(ignore_str: str) -> Set[Tuple[str, str, str]]:
         try:
             field_part, transition = entry.split(':', 1)
             old, new = transition.split('->', 1)
-            result.add((field_part, old, new))
+            result.add((field_part.strip(), old.strip(), new.strip()))
         except ValueError:
             # Malformed entry, skip
             continue

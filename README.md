@@ -30,6 +30,11 @@ This repo monitors the sites listed in `watchlist.txt` and checks for changes or
    
    permissions:
      issues: write
+     contents: read
+
+   concurrency:
+     group: site-scanning-alerts-${{ github.repository }}
+     cancel-in-progress: false
    
    jobs:
      check-alerts:
@@ -64,11 +69,11 @@ primary_scan_status: completed -> timeout
 Please investigate as appropriate.
 ```
 
-The action uses **rolling issues** with fingerprints:
-- **First detection** → creates a new issue
-- **Changes** → comments on the existing issue with the new findings
-- **Condition clears** → adds a "condition cleared" comment (does not auto-close)
-- **Re-runs with identical findings** → no-op (no duplicate issues)
+The action uses **fingerprinted filing** (no rolling comments, no auto-close - MVP tradeoff, see [Known Limitations](#known-limitations)):
+- **First detection** → files a new issue
+- **Re-runs with identical findings while that issue is still open** → no-op (no duplicate issues)
+- **Different findings** (a new domain fails, or the set of failures changes) → files another issue, since the fingerprint no longer matches
+- **Condition clears** → reported in the step summary only; no issue is touched. Close the issue yourself once you've confirmed it's resolved.
 
 ## Configuring Your Watchlist
 
@@ -107,8 +112,8 @@ The action is configured via inputs in `.github/workflows/site-scanning-alerts.y
 | Input | Default | Description |
 |-------|---------|-------------|
 | `watchlist` | `watchlist.txt` | Path to the file containing domains to monitor (one per line, supports base:domain.gov syntax for all subdomains) |
-| `mode` | `both` | Alert mode: `change` (detect changes between latest and previous snapshots), `state` (alert on bad current values), or `both` |
-| `fields` | `live,status_code,primary_scan_status` | Comma-separated list of fields to monitor for changes (change mode only). Available: live, status_code, primary_scan_status |
+| `mode` | `both` | Alert mode: `change` (detect changes between latest and previous snapshots), `state` (alert on bad current values), or `both`. `change` alone cannot confirm recovery from a sustained outage - use `state` or `both` for availability monitoring. Any other value is a hard configuration error |
+| `fields` | `live,status_code,primary_scan_status` | Comma-separated list of fields to monitor for changes (change mode only). Any column present in the Site Scanning snapshot is supported (e.g. live, status_code, primary_scan_status, https_enforced, hsts). Unrecognized field names are reported in the step summary and skipped |
 | `alert_on_status_codes` | `500,502,503,504` | Comma-separated list of HTTP status codes to alert on (state mode). Example: 500,502,503,504 |
 | `alert_on_scan_status` | *(empty)* | Comma-separated list of primary_scan_status values to alert on (state mode). Leave empty to disable. Example: connection_refused,invalid_ssl_cert |
 | `alert_on_not_live` | `false` | Alert when monitored sites have live=false (state mode) |
@@ -123,7 +128,6 @@ The action is configured via inputs in `.github/workflows/site-scanning-alerts.y
 | `token` | `${{ github.token }}` | GitHub token for creating issues. Defaults to github.token (requires permissions.issues: write) |
 | `fail_on_alert` | `false` | Whether to fail the workflow when an alert is fired |
 | `dry_run` | `false` | When true, render alert to step summary instead of creating an issue |
-| `comment_on_clear` | `true` | When true and an existing alert issue has been resolved, add a comment noting the condition cleared |
 
 **Default `ignore_transitions`:** The action suppresses flapping between transient scan statuses by default:
 ```
@@ -197,13 +201,17 @@ ignore_transitions: 'primary_scan_status:completed->timeout,primary_scan_status:
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Workflow ran, no issue, no alerts | Watchlist matches nothing | Check the workflow's step summary for unmatched entries. Verify domains exist in the [Site Scanning target list](https://github.com/GSA/federal-website-index/blob/main/data/site-scanning-target-url-list.csv) |
-| "Snapshot has not rotated" message | Ran multiple times before 15:00 UTC rotation | Expected behavior. The action is idempotent when snapshots haven't changed. |
+| "N watchlist entries matched nothing" warning | One or more (but not all) watchlist entries don't match the snapshot | The step summary lists exactly which entries didn't match, even when the rest of your watchlist is monitored fine. Check those entries for typos |
+| "Snapshot has not rotated" message | Ran multiple times before 15:00 UTC rotation | Expected behavior. Change detection is skipped for that run, but state-mode checks (if enabled) still run against current data, so an active outage is never missed. The action is idempotent when snapshots haven't changed. |
 | HTTP 403 from api.gsa.gov | Rate limit or network policy block | The action retries automatically. Check the workflow log for retry attempts. If persistent, contact GSA or check your org's firewall rules. |
 | Issue created but label missing | Label didn't exist in the repo | The action creates the label automatically (requires `permissions: issues: write`). Check that the workflow has this permission. |
 | Too many alerts (100+ changes) | Large `base:` watchlist + noisy domain | Raise `max_changes` to get a summary, or switch to exact-domain Model 1 for critical sites only |
-| "Snapshot is stale" message | Upstream scanning engine hasn't run | The action reports staleness instead of flooding with change alerts. Check the [Site Scanning engine's workflows](https://github.com/GSA/site-scanning-engine/actions). |
+| "Snapshot is stale" message | Upstream scanning engine hasn't run | The action reports staleness instead of flooding with change alerts, and files a "data is stale" issue. Check the [Site Scanning engine's workflows](https://github.com/GSA/site-scanning-engine/actions). Once fresh data returns, close the staleness issue manually - the action doesn't auto-comment or auto-close it. |
 | Nothing since \<date\> but sites are fine | Snapshot rotation cadence | Snapshots rotate once daily at 15:00 UTC. The action runs at 15:30 UTC to catch the fresh data. |
 | Empty watchlist warning | `watchlist.txt` has only comments/blanks | Add at least one domain (uncomment an example or add your own) |
+| "No alerts this run" | No findings this run | Expected when everything's healthy. In `mode: change`, this can also mean "nothing changed since yesterday" - which is not the same as "recovered" for a sustained outage. Switch to `mode: state` or `mode: both` if you need the action to actively confirm current health rather than only detect transitions. |
+| "Invalid `mode`" error, workflow fails | `mode` input misspelled or unsupported | `mode` must be exactly `change`, `state`, or `both`. Fix the typo in the workflow file. |
+| "Empty `labels` input" warning | `labels` input overridden to `''` | The action falls back to `site-scanning-alert` and warns, rather than creating a duplicate issue on every run (an empty label list can never match an existing issue). Set `labels` explicitly if you want a different label. |
 
 ---
 
@@ -299,7 +307,7 @@ cat /tmp/summary.md
 │   ├── site_scanning_alerts.py  # Entrypoint
 │   ├── snapshot.py          # CSV download + filtering + freshness checks
 │   ├── rules.py             # Change-diff + state-check + rendering
-│   └── issues.py            # Fingerprinted issue lifecycle
+│   └── issues.py            # Fingerprinted issue filing (file-or-skip, no rolling comments)
 ├── tests/                   # stdlib unittest
 │   ├── test_snapshot.py
 │   ├── test_rules.py
@@ -313,9 +321,11 @@ cat /tmp/summary.md
 
 ### Releasing
 
+**First release only:** `.github/workflows/site-scanning-alerts.yml` and this README's quickstart both reference `GSA/site-scanning-alert-template@v1`. That tag does not exist until someone creates it — consumer workflows will fail to resolve the action until the initial `v1` tag is pushed.
+
 1. Merge PR to `main`
 2. Tag the release: `git tag v1.x.x && git push origin v1.x.x`
-3. Move the `v1` tag: `git tag -f v1 && git push -f origin v1`
+3. Move the `v1` tag: `git tag -f v1 && git push -f origin v1` (on the first release, this creates `v1`; on subsequent releases, it moves it)
 
 Consumers reference `GSA/site-scanning-alert-template@v1` and get the latest v1.x automatically.
 
@@ -323,7 +333,7 @@ Consumers reference `GSA/site-scanning-alert-template@v1` and get the latest v1.
 
 - **CSV-only:** No JSON snapshot support (JSON is 2.5× larger with zero benefit for diffing)
 - **Single repo issues:** Can't file issues cross-repo (by design — simpler token model)
-- **No auto-close:** Issues are left open when condition clears (with a comment) rather than auto-closed
+- **No auto-close, no rolling comments:** Each distinct set of findings files its own issue (deduped only against an already-open issue with the identical fingerprint); recovery is reported in the step summary, not on the issue. Triage and closing are manual. This is an intentional MVP tradeoff - a bit more issue-tab noise in exchange for a much simpler, harder-to-break filing path. Revisit if the noise becomes a real problem.
 - **No historical trending:** Each alert is independent; no aggregation of "site X has been flapping for 7 days"
 - **API unsupported:** Site Scanning's REST API can't filter by `status_code` or `primary_scan_status`, and DEMO_KEY rate-limits at ~6 requests. CSV diff is the only viable approach.
 

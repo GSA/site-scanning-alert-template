@@ -18,6 +18,16 @@ permissions:
   issues: write
   contents: read
 
+# Serializes overlapping runs of this workflow (e.g. a scheduled run
+# landing while a manual workflow_dispatch run is still in flight).
+# find_open_issue + create_issue is a non-atomic find-then-create
+# sequence, so two concurrent runs can each observe no matching issue and
+# both create one. cancel-in-progress is false so the second run queues
+# rather than being killed mid-run.
+concurrency:
+  group: site-scanning-alerts-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   check-alerts:
     runs-on: ubuntu-latest

@@ -12,12 +12,12 @@ inputs:
     default: 'watchlist.txt'
   
   mode:
-    description: 'Alert mode: change (detect changes between latest and previous snapshots), state (alert on bad current values), or both'
+    description: 'Alert mode: change (detect changes between latest and previous snapshots), state (alert on bad current values), or both. change alone cannot confirm recovery from a sustained outage (no diff on day 2 of an outage looks identical to no diff on a healthy day) - use state or both for availability monitoring. Any other value is a hard configuration error.'
     required: false
     default: 'both'
   
   fields:
-    description: 'Comma-separated list of fields to monitor for changes (change mode only). Available: live, status_code, primary_scan_status'
+    description: 'Comma-separated list of fields to monitor for changes (change mode only). Any column present in the Site Scanning snapshot is supported (e.g. live, status_code, primary_scan_status, https_enforced, hsts). Unrecognized field names are reported in the step summary and skipped.'
     required: false
     default: 'live,status_code,primary_scan_status'
   
@@ -90,11 +90,6 @@ inputs:
     description: 'When true, render alert to step summary instead of creating an issue'
     required: false
     default: 'false'
-  
-  comment_on_clear:
-    description: 'When true and an existing alert issue has been resolved, add a comment noting the condition cleared'
-    required: false
-    default: 'true'
 
 runs:
   using: composite
@@ -121,6 +116,5 @@ runs:
         INPUT_TOKEN: ${{ inputs.token }}
         INPUT_FAIL_ON_ALERT: ${{ inputs.fail_on_alert }}
         INPUT_DRY_RUN: ${{ inputs.dry_run }}
-        INPUT_COMMENT_ON_CLEAR: ${{ inputs.comment_on_clear }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}
