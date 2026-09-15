@@ -199,6 +199,64 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
         self.assertEqual(cm.exception.code, 1)
 
 
+class TestStalenessMissingClientHardFails(SiteScanningAlertsTestCase):
+    """
+    Regression for finding #9: a stale snapshot with no token/repo (not a
+    dry run) must hard-fail like the main alert-filing path does, rather
+    than silently exiting 0 as if filing had succeeded.
+    """
+
+    def test_stale_snapshot_without_client_fails_loudly(self):
+        self._write_watchlist(['test1.gov'])
+
+        stale_rows = [dict(row, scan_date='2000-01-01') for row in LATEST_ROWS]
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            return stale_rows
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_DRY_RUN': 'false',
+            'INPUT_TOKEN': '',
+            'INPUT_MAX_SNAPSHOT_AGE_DAYS': '3',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': ''}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_stale_snapshot_dry_run_without_client_still_exits_clean(self):
+        self._write_watchlist(['test1.gov'])
+
+        stale_rows = [dict(row, scan_date='2000-01-01') for row in LATEST_ROWS]
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            return stale_rows
+
+        env = dict(BASE_ENV)
+        env.update({
+            'INPUT_DRY_RUN': 'true',
+            'INPUT_TOKEN': '',
+            'INPUT_MAX_SNAPSHOT_AGE_DAYS': '3',
+        })
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': ''}), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 0)
+
+
 class TestCustomFieldWarning(SiteScanningAlertsTestCase):
     """Regression for finding #7: unrecognized custom fields must be reported, not silently no-op'd."""
 

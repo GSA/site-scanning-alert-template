@@ -152,19 +152,25 @@ def main():
             print(msg)
             write_step_summary(msg)
 
-            if client:
-                result = file_alert(
-                    client,
-                    "Site Scanning data is stale",
-                    msg,
-                    labels,
-                    stream='staleness'
-                )
-                print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
+            if dry_run:
+                sys.exit(0)
 
-                if fail_on_alert:
-                    print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
-                    sys.exit(1)
+            if not client:
+                print("ERROR: token and GITHUB_REPOSITORY must be set for non-dry-run mode")
+                sys.exit(1)
+
+            result = file_alert(
+                client,
+                "Site Scanning data is stale",
+                msg,
+                labels,
+                stream='staleness'
+            )
+            print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
+
+            if fail_on_alert:
+                print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
+                sys.exit(1)
 
             sys.exit(0)
 
