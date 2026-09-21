@@ -6,12 +6,11 @@ Downloads and parses Site Scanning CSV snapshots with filtered column projection
 to minimize memory use on large files (~45 MB, ~30k rows).
 """
 import csv
-import urllib.request
+import time
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
-import time
-
 
 # One parsed snapshot row: CSV column name -> value (never None; see _parse).
 Row = Dict[str, str]
@@ -24,7 +23,7 @@ REQUIRED_COLUMNS = [
     'live',
     'status_code',
     'primary_scan_status',
-    'scan_date'
+    'scan_date',
 ]
 
 # Watchlist entry prefix selecting base-domain (rather than exact) matching,
@@ -62,7 +61,7 @@ def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
         except urllib.error.HTTPError as e:
             last_error = SnapshotError(f"HTTP {e.code} from {url}: {e.reason}")
             if e.code in (403, 404, 410):  # Client errors - don't retry
-                raise last_error
+                raise last_error from e
         except urllib.error.URLError as e:
             last_error = SnapshotError(f"Failed to fetch {url}: {e.reason}")
 
@@ -75,7 +74,7 @@ def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
 def _determine_columns_to_keep(
     fieldnames: List[str],
     wanted_columns: Optional[List[str]],
-    optional_columns: Optional[List[str]]
+    optional_columns: Optional[List[str]],
 ) -> Set[str]:
     """Determine the set of columns to project from available CSV headers."""
     available = set(fieldnames)
@@ -85,7 +84,7 @@ def _determine_columns_to_keep(
         missing = set(wanted_columns) - available
         if missing:
             raise SnapshotError(
-                f"Snapshot missing required columns: {', '.join(sorted(missing))}"
+                f"Snapshot missing required columns: {', '.join(sorted(missing))}",
             )
         keep = set(wanted_columns)
 
@@ -99,7 +98,7 @@ def _parse(
     raw: bytes,
     url: str,
     wanted_columns: Optional[List[str]],
-    optional_columns: Optional[List[str]]
+    optional_columns: Optional[List[str]],
 ) -> List[Row]:
     """
     Parse and project a downloaded snapshot's CSV bytes.
@@ -117,7 +116,7 @@ def _parse(
     try:
         reader = csv.DictReader(raw.decode('utf-8', errors='replace').splitlines())
     except (csv.Error, UnicodeDecodeError) as e:
-        raise SnapshotError(f"Failed to parse CSV from {url}: {e}")
+        raise SnapshotError(f"Failed to parse CSV from {url}: {e}") from e
 
     if reader.fieldnames is None:
         raise SnapshotError(f"Snapshot at {url} has no header row")
@@ -130,7 +129,7 @@ def _parse(
             for row in reader
         ]
     except csv.Error as e:
-        raise SnapshotError(f"Failed to parse CSV from {url}: {e}")
+        raise SnapshotError(f"Failed to parse CSV from {url}: {e}") from e
 
     if not rows:
         raise SnapshotError(f"Snapshot at {url} contains zero rows")
@@ -143,7 +142,7 @@ def download_snapshot(
     wanted_columns: Optional[List[str]] = None,
     retry_count: int = 3,
     retry_delay: float = 2.0,
-    optional_columns: Optional[List[str]] = None
+    optional_columns: Optional[List[str]] = None,
 ) -> List[Row]:
     """
     Download and parse a Site Scanning CSV snapshot.
@@ -249,16 +248,16 @@ def find_unmatched_entries(rows: List[Row], watchlist: List[str]) -> List[str]:
 def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
     """
     Parse scan_date field to datetime.
-    
+
     Args:
         scan_date_str: ISO8601 datetime string from snapshot
-    
+
     Returns:
         datetime object, or None if parsing fails
     """
     if not scan_date_str:
         return None
-    
+
     try:
         # Handle both "2026-09-02T08:11:41.911Z" and "2026-09-02" formats.
         # Both are normalized to UTC-aware datetimes - a naive datetime
@@ -288,7 +287,7 @@ def _max_scan_date(rows: List[Row]) -> Optional[datetime]:
 
 def check_snapshot_freshness(
     rows: List[Row],
-    max_age_days: int
+    max_age_days: int,
 ) -> Tuple[bool, Optional[str]]:
     """
     Check if snapshot is fresh enough to use.
@@ -312,7 +311,7 @@ def check_snapshot_freshness(
 
 def has_snapshot_rotated(
     latest_rows: List[Row],
-    previous_rows: List[Row]
+    previous_rows: List[Row],
 ) -> bool:
     """
     Check if latest snapshot is newer than previous (i.e., rotation has occurred).

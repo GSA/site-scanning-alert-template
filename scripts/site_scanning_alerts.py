@@ -13,25 +13,25 @@ from typing import List, NamedTuple, NoReturn, Optional, Set, Tuple
 # Add scripts directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from issues import IssueClient, file_alert
+from rules import (
+    Alert,
+    dedupe_alerts,
+    evaluate_change_diff,
+    evaluate_state_check,
+    parse_ignore_transitions,
+    render_alerts,
+)
 from snapshot import (
+    REQUIRED_COLUMNS,
+    Row,
+    SnapshotError,
+    check_snapshot_freshness,
     download_snapshot,
     filter_to_watchlist,
     find_unmatched_entries,
-    check_snapshot_freshness,
     has_snapshot_rotated,
-    REQUIRED_COLUMNS,
-    Row,
-    SnapshotError
 )
-from rules import (
-    evaluate_change_diff,
-    evaluate_state_check,
-    dedupe_alerts,
-    render_alerts,
-    parse_ignore_transitions,
-    Alert
-)
-from issues import IssueClient, file_alert
 
 # Fallback labels used when the `labels` input parses to an empty list
 # (e.g. a workflow override of `labels: ''`). file_alert requires at
@@ -126,11 +126,11 @@ def read_config() -> Config:
         issue_title=_env('issue_title', 'Possible website issues'),
         snapshot_url=_env(
             'snapshot_url',
-            'https://api.gsa.gov/technology/site-scanning/data/site-scanning-latest.csv'
+            'https://api.gsa.gov/technology/site-scanning/data/site-scanning-latest.csv',
         ),
         previous_snapshot_url=_env(
             'previous_snapshot_url',
-            'https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv'
+            'https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv',
         ),
         max_snapshot_age_days=int(_env('max_snapshot_age_days', '3')),
         token=_env('token'),
@@ -187,7 +187,7 @@ def _check_freshness_or_exit(
     config: Config,
     latest_rows: List[Row],
     labels: List[str],
-    client: Optional[IssueClient]
+    client: Optional[IssueClient],
 ) -> None:
     """Validate snapshot freshness and exit if stale (filing staleness issue if configured)."""
     is_fresh, max_date_str = check_snapshot_freshness(latest_rows, config.max_snapshot_age_days)
@@ -224,7 +224,7 @@ def _warn_unmatched_entries(latest_rows: List[Row], watchlist: List[str]) -> Non
 
     report(
         f"⚠️ **{len(unmatched)} watchlist entries matched nothing**\n\n{listed}\n\n"
-        "Check for typos or verify that these domains exist in the Site Scanning index."
+        "Check for typos or verify that these domains exist in the Site Scanning index.",
     )
 
 
@@ -243,7 +243,7 @@ def _resolve_fields(config: Config, latest_rows: List[Row], previous_rows: List[
         report(
             f"⚠️ **Unrecognized monitoring field(s) skipped:** {', '.join(dropped)}\n\n"
             "These are not present in the Site Scanning snapshot and will not be monitored. "
-            "Check for typos against the Site Scanning Data Dictionary."
+            "Check for typos against the Site Scanning Data Dictionary.",
         )
 
     return [f for f in config.fields if f in available]
@@ -253,7 +253,7 @@ def _evaluate_changes(
     config: Config,
     latest_rows: List[Row],
     filtered_latest: List[Row],
-    watchlist: List[str]
+    watchlist: List[str],
 ) -> Tuple[List[Alert], bool]:
     """Download previous snapshot and evaluate change diff.
 
@@ -262,7 +262,7 @@ def _evaluate_changes(
     """
     print(f"Downloading previous snapshot from {config.previous_snapshot_url}...")
     previous_rows = download_snapshot(
-        config.previous_snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields
+        config.previous_snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields,
     )
     print(f"Downloaded {len(previous_rows)} rows")
 
@@ -276,7 +276,7 @@ def _evaluate_changes(
             "ℹ️ **Snapshot has not rotated**\n\nLatest and previous snapshots have identical scan "
             "dates. This usually means the workflow ran multiple times before the daily rotation "
             "at 15:00 UTC.\n\nChange detection skipped for this run; state checks (if enabled) "
-            "still ran against the current data."
+            "still ran against the current data.",
         )
         return [], True
 
@@ -285,7 +285,7 @@ def _evaluate_changes(
         filter_to_watchlist(previous_rows, watchlist),
         effective_fields,
         config.ignore_blank_transitions,
-        parse_ignore_transitions(config.ignore_transitions_str)
+        parse_ignore_transitions(config.ignore_transitions_str),
     )
     print(f"Found {len(change_alerts)} change alerts")
     return change_alerts, False
@@ -296,7 +296,7 @@ def _publish_alerts(
     client: Optional[IssueClient],
     body: str,
     labels: List[str],
-    alert_count: int
+    alert_count: int,
 ) -> NoReturn:
     """Output alert preview in dry run, or file a GitHub issue. Always exits."""
     if config.dry_run:
@@ -317,7 +317,7 @@ def _publish_alerts(
     print(f"Issue URL: {url}")
     write_step_summary(
         f"## Site Scanning Alerts\n\n**Action:** {action}\n\n"
-        f"**Issue:** {url}\n\n**Alerts found:** {alert_count}"
+        f"**Issue:** {url}\n\n**Alerts found:** {alert_count}",
     )
 
     _exit_on_alert(config, "\nCompleted successfully")
@@ -327,7 +327,7 @@ def _collect_alerts(
     config: Config,
     latest_rows: List[Row],
     filtered_latest: List[Row],
-    watchlist: List[str]
+    watchlist: List[str],
 ) -> Tuple[List[Alert], bool]:
     """
     Run the evaluators enabled by `mode` and return their deduped findings.
@@ -340,7 +340,7 @@ def _collect_alerts(
 
     if config.mode in ('change', 'both'):
         change_alerts, rotation_stalled = _evaluate_changes(
-            config, latest_rows, filtered_latest, watchlist
+            config, latest_rows, filtered_latest, watchlist,
         )
         alerts.extend(change_alerts)
 
@@ -349,7 +349,7 @@ def _collect_alerts(
             filtered_latest,
             config.alert_on_status_codes,
             config.alert_on_scan_status,
-            config.alert_on_not_live
+            config.alert_on_not_live,
         )
         print(f"Found {len(state_alerts)} state alerts")
         alerts.extend(state_alerts)
@@ -370,7 +370,7 @@ def _load_watchlist_or_exit(path: str) -> List[str]:
             f"⚠️ **Watchlist is empty**\n\n"
             f"The watchlist file `{path}` contains no active entries "
             "(only comments or blank lines).\n\nAdd domains to monitor, one per line. "
-            "See the watchlist file for syntax examples."
+            "See the watchlist file for syntax examples.",
         )
         sys.exit(0)
 
@@ -385,7 +385,7 @@ def _exit_no_alerts(rotation_stalled: bool) -> NoReturn:
         # to report, and nothing new to file.
         report(
             "ℹ️ **No new information this run**\n\nSnapshot has not rotated, so change detection "
-            "was skipped, and no state-check findings were found. Skipping issue filing."
+            "was skipped, and no state-check findings were found. Skipping issue filing.",
         )
     else:
         # In change-only mode this just means "nothing changed today" (not
@@ -393,7 +393,7 @@ def _exit_no_alerts(rotation_stalled: bool) -> NoReturn:
         # 2), but either way there are no findings to file an issue for.
         report(
             "✅ **No alerts this run**\n\nAll monitored sites are operating as expected (or, in "
-            "`mode: change`, nothing changed since the last snapshot)."
+            "`mode: change`, nothing changed since the last snapshot).",
         )
     sys.exit(0)
 
@@ -428,14 +428,14 @@ def run(config: Config) -> NoReturn:
         sys.exit(0)
 
     all_alerts, rotation_stalled = _collect_alerts(
-        config, latest_rows, filtered_latest, watchlist
+        config, latest_rows, filtered_latest, watchlist,
     )
 
     if not all_alerts:
         _exit_no_alerts(rotation_stalled)
 
     _publish_alerts(
-        config, client, render_alerts(all_alerts, config.max_changes), labels, len(all_alerts)
+        config, client, render_alerts(all_alerts, config.max_changes), labels, len(all_alerts),
     )
 
 

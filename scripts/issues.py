@@ -12,10 +12,10 @@ lifecycle; revisit if the noise becomes a real problem.
 """
 import hashlib
 import json
-import urllib.request
 import urllib.error
 import urllib.parse
-from typing import List, Optional, Dict
+import urllib.request
+from typing import Dict, List, Optional
 
 # Cap on pages walked in find_open_issue - protects against runaway API
 # consumption in repos with a very large number of open issues.
@@ -39,7 +39,7 @@ def _find_issue_with_marker(issues: List[Dict], marker: str) -> Optional[Dict]:
             return {
                 'number': issue['number'],
                 'html_url': issue['html_url'],
-                'body': body
+                'body': body,
             }
     return None
 
@@ -65,14 +65,14 @@ class IssueClient:
         self,
         method: str,
         path: str,
-        data: Optional[Dict] = None
+        data: Optional[Dict] = None,
     ) -> Dict:
         """Make authenticated GitHub API request."""
         url = f"{self.base_url}{path}"
         headers = {
             'Authorization': f'Bearer {self.token}',
             'Accept': 'application/vnd.github+json',
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
         }
 
         req_data = json.dumps(data).encode() if data else None
@@ -83,9 +83,9 @@ class IssueClient:
                 return json.loads(response.read().decode())
         except urllib.error.HTTPError as e:
             error_body = e.read().decode() if e.fp else ''
-            raise RuntimeError(f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}")
+            raise RuntimeError(f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}") from e
         except urllib.error.URLError as e:
-            raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}")
+            raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
 
     def ensure_label(self, label: str, color: str = '0366d6', description: str = '') -> None:
         """Create label if it doesn't exist (idempotent)."""
@@ -102,7 +102,7 @@ class IssueClient:
         self._request('POST', '/labels', {
             'name': label,
             'color': color,
-            'description': description or f'Site Scanning alert: {label}'
+            'description': description or f'Site Scanning alert: {label}',
         })
 
     def find_open_issue(self, labels: List[str], marker: str) -> Optional[Dict]:
@@ -139,7 +139,7 @@ class IssueClient:
         print(
             f"WARNING: find_open_issue hit the {MAX_ISSUE_PAGES}-page cap "
             f"({MAX_ISSUE_PAGES * 100} issues) without finding a match; "
-            "treating as not found. Consider closing stale open issues."
+            "treating as not found. Consider closing stale open issues.",
         )
         return None
 
@@ -147,7 +147,7 @@ class IssueClient:
         self,
         title: str,
         body: str,
-        labels: List[str]
+        labels: List[str],
     ) -> Dict:
         """
         Create a new issue.
@@ -158,13 +158,13 @@ class IssueClient:
         data = {
             'title': title,
             'body': body,
-            'labels': labels
+            'labels': labels,
         }
 
         result = self._request('POST', '/issues', data)
         return {
             'number': result['number'],
-            'html_url': result['html_url']
+            'html_url': result['html_url'],
         }
 
 
@@ -204,7 +204,7 @@ def file_alert(
     title: str,
     body: str,
     labels: List[str],
-    stream: str = 'alerts'
+    stream: str = 'alerts',
 ) -> Dict[str, Optional[str]]:
     """
     File a new issue for the given findings, unless an open issue already
@@ -235,7 +235,7 @@ def file_alert(
         raise ValueError(
             "file_alert requires at least one label; an empty labels "
             "list means an existing issue can never be found, so every "
-            "run would create a new one."
+            "run would create a new one.",
         )
 
     marker = alert_marker(stream, compute_fingerprint(body))

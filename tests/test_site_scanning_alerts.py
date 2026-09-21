@@ -8,11 +8,11 @@ through its real INPUT_* env-var interface, stubbing out network access
 (download_snapshot) and, where relevant, issue filing (file_alert), and
 assert on GITHUB_STEP_SUMMARY output.
 """
-import unittest
+import csv
 import os
 import sys
-import csv
 import tempfile
+import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
@@ -270,7 +270,7 @@ class TestCustomFieldWarning(SiteScanningAlertsTestCase):
 
         code = self._run_main(
             {'INPUT_FIELDS': 'live,status_code,bogus_field'},
-            fake_download
+            fake_download,
         )
 
         self.assertEqual(code, 0)

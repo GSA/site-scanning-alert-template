@@ -5,9 +5,9 @@ Alert rule evaluation for Site Scanning data.
 Implements change-detection (latest vs previous) and state-check (bad current values)
 with configurable noise suppression.
 """
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
-from collections import Counter
 
 # One snapshot row: CSV column name -> value. Deliberately re-declared here
 # rather than imported from snapshot.py - this module is pure logic with no
@@ -60,7 +60,7 @@ def _should_ignore_change(
     old: str,
     new: str,
     ignore_blank_transitions: bool,
-    ignore_transitions: Set[Transition]
+    ignore_transitions: Set[Transition],
 ) -> bool:
     """Determine whether a field value transition should be ignored."""
     if old == new:
@@ -76,7 +76,7 @@ def _diff_domain_fields(
     latest_row: Row,
     fields: List[str],
     ignore_blank_transitions: bool,
-    ignore_transitions: Set[Transition]
+    ignore_transitions: Set[Transition],
 ) -> List[Alert]:
     """Find changed fields between previous and latest snapshots for a single domain."""
     alerts = []
@@ -94,7 +94,7 @@ def evaluate_change_diff(
     previous_rows: List[Row],
     fields: List[str],
     ignore_blank_transitions: bool = False,
-    ignore_transitions: Optional[Set[Transition]] = None
+    ignore_transitions: Optional[Set[Transition]] = None,
 ) -> List[Alert]:
     """
     Detect changes between latest and previous snapshots.
@@ -125,7 +125,7 @@ def evaluate_change_diff(
             continue
 
         alerts.extend(_diff_domain_fields(
-            domain, prev_row, latest_row, fields, ignore_blank_transitions, ignore_transitions
+            domain, prev_row, latest_row, fields, ignore_blank_transitions, ignore_transitions,
         ))
 
     # Check for domains that disappeared
@@ -142,7 +142,7 @@ def evaluate_state_check(
     latest_rows: List[Row],
     alert_on_status_codes: Set[str],
     alert_on_scan_status: Set[str],
-    alert_on_not_live: bool
+    alert_on_not_live: bool,
 ) -> List[Alert]:
     """
     Check current state for bad values.
@@ -152,7 +152,7 @@ def evaluate_state_check(
         alert_on_status_codes: Set of status_code values to alert on (e.g. {'500', '503'})
         alert_on_scan_status: Set of primary_scan_status values to alert on
         alert_on_not_live: If True, alert when live=false
-    
+
     Returns:
         List of Alert objects
     """

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Tests for issues.py"""
-import unittest
 import os
 import sys
+import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
 from issues import (
-    compute_fingerprint,
-    alert_marker,
+    MAX_ISSUE_PAGES,
     IssueClient,
+    alert_marker,
+    compute_fingerprint,
     file_alert,
-    MAX_ISSUE_PAGES
 )
 
 
@@ -186,7 +186,7 @@ class TestFileAlert(unittest.TestCase):
 
         result = file_alert(
             client, 'Possible website issues', 'something is wrong',
-            ['site-scanning-alert']
+            ['site-scanning-alert'],
         )
 
         self.assertEqual(result['action'], 'created')
@@ -198,13 +198,13 @@ class TestFileAlert(unittest.TestCase):
 
         first = file_alert(
             client, 'Possible website issues', 'something is wrong',
-            ['site-scanning-alert']
+            ['site-scanning-alert'],
         )
         client.ensure_label_calls.clear()
 
         second = file_alert(
             client, 'Possible website issues', 'something is wrong',
-            ['site-scanning-alert']
+            ['site-scanning-alert'],
         )
 
         self.assertEqual(second['action'], 'no-op')
@@ -223,11 +223,11 @@ class TestFileAlert(unittest.TestCase):
 
         first = file_alert(
             client, 'Possible website issues', 'domain-a is down',
-            ['site-scanning-alert']
+            ['site-scanning-alert'],
         )
         second = file_alert(
             client, 'Possible website issues', 'domain-a and domain-b are down',
-            ['site-scanning-alert']
+            ['site-scanning-alert'],
         )
 
         self.assertEqual(first['action'], 'created')
@@ -245,11 +245,11 @@ class TestFileAlert(unittest.TestCase):
 
         alert_result = file_alert(
             client, 'Possible website issues', 'something is wrong',
-            ['site-scanning-alert'], stream='alerts'
+            ['site-scanning-alert'], stream='alerts',
         )
         stale_result = file_alert(
             client, 'Site Scanning data is stale', 'data is stale',
-            ['site-scanning-alert'], stream='staleness'
+            ['site-scanning-alert'], stream='staleness',
         )
 
         self.assertEqual(alert_result['action'], 'created')
@@ -261,16 +261,16 @@ class TestFileAlert(unittest.TestCase):
         client = MarkerFilteringFakeClient()
         file_alert(
             client, 'Possible website issues', 'something is wrong',
-            ['site-scanning-alert'], stream='alerts'
+            ['site-scanning-alert'], stream='alerts',
         )
         file_alert(
             client, 'Site Scanning data is stale', 'data is stale',
-            ['site-scanning-alert'], stream='staleness'
+            ['site-scanning-alert'], stream='staleness',
         )
 
         result = file_alert(
             client, 'Site Scanning data is stale', 'data is stale',
-            ['site-scanning-alert'], stream='staleness'
+            ['site-scanning-alert'], stream='staleness',
         )
 
         self.assertEqual(result['action'], 'no-op')
@@ -282,11 +282,11 @@ class TestFileAlert(unittest.TestCase):
 
         file_alert(
             client, 'Possible website issues', 'something is wrong',
-            ['site-scanning-alert']  # no explicit stream
+            ['site-scanning-alert'],  # no explicit stream
         )
         result = file_alert(
             client, 'Possible website issues', 'something is wrong',
-            ['site-scanning-alert'], stream='alerts'
+            ['site-scanning-alert'], stream='alerts',
         )
 
         self.assertEqual(result['action'], 'no-op')  # same stream, same fingerprint
@@ -302,7 +302,7 @@ class TestFileAlert(unittest.TestCase):
         with self.assertRaises(ValueError):
             file_alert(
                 client, 'Possible website issues', 'something is wrong',
-                []
+                [],
             )
 
 
