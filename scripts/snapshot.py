@@ -29,6 +29,13 @@ class SnapshotError(Exception):
     pass
 
 
+def _fetch_attempt(url: str) -> bytes:
+    """Execute a single HTTP request for snapshot bytes."""
+    req = urllib.request.Request(url, headers={'User-Agent': 'GSA-Site-Scanning-Alert-Action'})
+    with urllib.request.urlopen(req, timeout=180) as response:
+        return response.read()
+
+
 def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
     """
     Download the raw bytes of a snapshot, retrying on transient network
@@ -42,9 +49,7 @@ def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
 
     for attempt in range(retry_count):
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'GSA-Site-Scanning-Alert-Action'})
-            with urllib.request.urlopen(req, timeout=180) as response:
-                return response.read()
+            return _fetch_attempt(url)
         except urllib.error.HTTPError as e:
             last_error = SnapshotError(f"HTTP {e.code} from {url}: {e.reason}")
             if e.code in (403, 404, 410):  # Client errors - don't retry
@@ -56,6 +61,29 @@ def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
             time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
 
     raise last_error
+
+
+def _determine_columns_to_keep(
+    fieldnames: List[str],
+    wanted_columns: Optional[List[str]],
+    optional_columns: Optional[List[str]]
+) -> Set[str]:
+    """Determine the set of columns to project from available CSV headers."""
+    available = set(fieldnames)
+    if not wanted_columns:
+        keep = set(available)
+    else:
+        missing = set(wanted_columns) - available
+        if missing:
+            raise SnapshotError(
+                f"Snapshot missing required columns: {', '.join(sorted(missing))}"
+            )
+        keep = set(wanted_columns)
+
+    if optional_columns:
+        keep |= (set(optional_columns) & available)
+
+    return keep
 
 
 def _parse(
@@ -85,20 +113,7 @@ def _parse(
     if reader.fieldnames is None:
         raise SnapshotError(f"Snapshot at {url} has no header row")
 
-    # Determine which columns to keep
-    available = set(reader.fieldnames)
-    if wanted_columns:
-        missing = set(wanted_columns) - available
-        if missing:
-            raise SnapshotError(
-                f"Snapshot missing required columns: {', '.join(sorted(missing))}"
-            )
-        keep = set(wanted_columns)
-    else:
-        keep = set(reader.fieldnames)
-
-    if optional_columns:
-        keep |= (set(optional_columns) & available)
+    keep = _determine_columns_to_keep(reader.fieldnames, wanted_columns, optional_columns)
 
     try:
         rows = [
@@ -204,6 +219,17 @@ def filter_to_watchlist(
     ]
 
 
+def _is_watchlist_entry_present(
+    entry: str,
+    present_domains: Set[str],
+    present_bases: Set[str]
+) -> bool:
+    """Check if a single watchlist entry matches any domain or base domain."""
+    is_base, value = _parse_watchlist_entry(entry)
+    present = present_bases if is_base else present_domains
+    return value in present
+
+
 def find_unmatched_entries(
     rows: List[Dict[str, str]],
     watchlist: List[str]
@@ -226,14 +252,10 @@ def find_unmatched_entries(
     present_domains = {row.get('initial_domain', '').lower() for row in rows}
     present_bases = {row.get('initial_base_domain', '').lower() for row in rows}
 
-    unmatched = []
-    for entry in watchlist:
-        is_base, value = _parse_watchlist_entry(entry)
-        present = present_bases if is_base else present_domains
-        if value not in present:
-            unmatched.append(entry)
-
-    return unmatched
+    return [
+        entry for entry in watchlist
+        if not _is_watchlist_entry_present(entry, present_domains, present_bases)
+    ]
 
 
 def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
@@ -255,10 +277,8 @@ def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
         # from the date-only format would otherwise raise TypeError when
         # compared against the tz-aware datetime parsed from the other
         # format (e.g. in has_snapshot_rotated).
-        if 'T' in scan_date_str:
-            parsed = datetime.fromisoformat(scan_date_str.replace('Z', '+00:00'))
-        else:
-            parsed = datetime.fromisoformat(scan_date_str)
+        normalized = scan_date_str.replace('Z', '+00:00') if 'T' in scan_date_str else scan_date_str
+        parsed = datetime.fromisoformat(normalized)
 
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)

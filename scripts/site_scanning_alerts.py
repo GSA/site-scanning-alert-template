@@ -8,7 +8,7 @@ GSA Site Scanning data.
 import os
 import sys
 import traceback
-from typing import List, NamedTuple, Set
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 # Add scripts directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -71,15 +71,13 @@ def load_watchlist(path: str) -> List[str]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Watchlist file not found: {path}")
 
-    with open(path, 'r') as f:
-        lines = f.readlines()
-
     entries = []
-    for line in lines:
-        line = line.strip()
-        # Skip comments and empty lines
-        if line and not line.startswith('#'):
-            entries.append(line)
+    with open(path, 'r') as f:
+        for line in f:
+            stripped = line.strip()
+            # Skip comments and empty lines
+            if stripped and not stripped.startswith('#'):
+                entries.append(stripped)
 
     return entries
 
@@ -142,6 +140,171 @@ def read_config() -> Config:
     )
 
 
+def _validate_mode(mode: str) -> None:
+    """Validate mode before any network I/O."""
+    if mode not in VALID_MODES:
+        msg = f"❌ **Invalid `mode`: `{mode}`**\n\nExpected one of: {', '.join(VALID_MODES)}."
+        print(msg, file=sys.stderr)
+        write_step_summary(msg)
+        sys.exit(1)
+
+
+def _resolve_labels(labels: List[str]) -> List[str]:
+    """Ensure at least one label is provided, falling back to default if empty."""
+    if labels:
+        return labels
+    fallback = list(DEFAULT_LABELS)
+    report(f"⚠️ **Empty `labels` input - falling back to default labels:** {', '.join(fallback)}")
+    return fallback
+
+
+def _init_client(config: Config) -> Optional[IssueClient]:
+    """Initialize GitHub issue client for non-dry runs."""
+    if config.dry_run:
+        return None
+    if not (config.token and config.repo):
+        print("ERROR: token and GITHUB_REPOSITORY must be set for non-dry-run mode", file=sys.stderr)
+        sys.exit(1)
+    return IssueClient(config.repo, config.token)
+
+
+def _check_freshness_or_exit(
+    config: Config,
+    latest_rows: List[Dict[str, str]],
+    labels: List[str],
+    client: Optional[IssueClient]
+) -> None:
+    """Validate snapshot freshness and exit if stale (filing staleness issue if configured)."""
+    is_fresh, max_date_str = check_snapshot_freshness(latest_rows, config.max_snapshot_age_days)
+    if is_fresh:
+        print(f"Snapshot freshness OK (dated {max_date_str})")
+        return
+
+    msg = (
+        f"⚠️ **Snapshot is stale**\n\nLatest snapshot is dated {max_date_str or 'unknown'}, "
+        f"which is older than {config.max_snapshot_age_days} days.\n\n"
+        "This typically indicates the scanning engine has not run recently. "
+        "Please investigate the upstream system before acting on any alerts."
+    )
+    report(msg)
+
+    if config.dry_run:
+        sys.exit(0)
+
+    result = file_alert(client, "Site Scanning data is stale", msg, labels, stream='staleness')
+    print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
+
+    if config.fail_on_alert:
+        print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
+        sys.exit(1)
+
+    sys.exit(0)
+
+
+def _warn_unmatched_entries(latest_rows: List[Dict[str, str]], watchlist: List[str]) -> None:
+    """Report watchlist entries that matched no domains in snapshot."""
+    unmatched_entries = find_unmatched_entries(latest_rows, watchlist)
+    if not unmatched_entries:
+        return
+
+    unmatched_list = '\n'.join(f"  - {entry}" for entry in unmatched_entries[:10])
+    if len(unmatched_entries) > 10:
+        unmatched_list += f"\n  ... and {len(unmatched_entries) - 10} more"
+
+    report(
+        f"⚠️ **{len(unmatched_entries)} watchlist entries matched nothing**\n\n{unmatched_list}\n\n"
+        "Check for typos or verify that these domains exist in the Site Scanning index."
+    )
+
+
+def _evaluate_changes(
+    config: Config,
+    latest_rows: List[Dict[str, str]],
+    filtered_latest: List[Dict[str, str]],
+    watchlist: List[str]
+) -> Tuple[List[Alert], bool]:
+    """Download previous snapshot and evaluate change diff.
+
+    Returns:
+        (change_alerts, rotation_stalled)
+    """
+    print(f"Downloading previous snapshot from {config.previous_snapshot_url}...")
+    previous_rows = download_snapshot(
+        config.previous_snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields
+    )
+    print(f"Downloaded {len(previous_rows)} rows")
+
+    # Custom fields are only usable for change detection if present
+    # on both sides of the diff - a field missing from one side
+    # would otherwise appear as a spurious '' -> value change on
+    # every row.
+    available_fields = set(latest_rows[0].keys()) & set(previous_rows[0].keys())
+    effective_fields = [f for f in config.fields if f in available_fields]
+    dropped_fields = [f for f in config.fields if f not in available_fields]
+    if dropped_fields:
+        report(
+            f"⚠️ **Unrecognized monitoring field(s) skipped:** {', '.join(dropped_fields)}\n\n"
+            "These are not present in the Site Scanning snapshot and will not be monitored. "
+            "Check for typos against the Site Scanning Data Dictionary."
+        )
+
+    # Check rotation. A stalled rotation means there's no fresh diff
+    # to evaluate, but that's no reason to skip state-mode checks -
+    # an active outage doesn't wait for the daily snapshot rotation.
+    if not has_snapshot_rotated(latest_rows, previous_rows):
+        report(
+            "ℹ️ **Snapshot has not rotated**\n\nLatest and previous snapshots have identical scan "
+            "dates. This usually means the workflow ran multiple times before the daily rotation "
+            "at 15:00 UTC.\n\nChange detection skipped for this run; state checks (if enabled) "
+            "still ran against the current data."
+        )
+        return [], True
+
+    filtered_previous = filter_to_watchlist(previous_rows, watchlist)
+    ignore_transitions = parse_ignore_transitions(config.ignore_transitions_str)
+    change_alerts = evaluate_change_diff(
+        filtered_latest,
+        filtered_previous,
+        effective_fields,
+        config.ignore_blank_transitions,
+        ignore_transitions
+    )
+    print(f"Found {len(change_alerts)} change alerts")
+    return change_alerts, False
+
+
+def _publish_alerts(
+    config: Config,
+    client: Optional[IssueClient],
+    body: str,
+    labels: List[str],
+    alert_count: int
+) -> None:
+    """Output alert preview in dry run or file GitHub issue."""
+    if config.dry_run:
+        print("\n" + "=" * 60)
+        print("DRY RUN - Issue body preview:")
+        print("=" * 60)
+        print(body)
+        print("=" * 60)
+        write_step_summary(f"## Dry Run\n\n{body}")
+        return
+
+    result = file_alert(client, config.issue_title, body, labels, stream='alerts')
+    action = result['action']
+    url = result.get('issue_url', 'N/A')
+
+    print(f"\nIssue filing: {action}")
+    print(f"Issue URL: {url}")
+
+    summary = f"## Site Scanning Alerts\n\n**Action:** {action}\n\n**Issue:** {url}\n\n**Alerts found:** {alert_count}"
+    write_step_summary(summary)
+
+    if config.fail_on_alert:
+        print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
+        sys.exit(1)
+
+
 def run(config: Config) -> None:
     """
     Run one evaluation cycle. Exits the process directly (via sys.exit) at
@@ -149,41 +312,13 @@ def run(config: Config) -> None:
     SnapshotError or unexpected exception raised from here is caught by
     main().
     """
-    # Validate mode before any network I/O. An unrecognized mode would
-    # otherwise skip both the change and state evaluators, silently
-    # leaving all_alerts empty instead of hard-failing on a
-    # misconfigured workflow.
-    if config.mode not in VALID_MODES:
-        msg = f"❌ **Invalid `mode`: `{config.mode}`**\n\nExpected one of: {', '.join(VALID_MODES)}."
-        print(msg, file=sys.stderr)
-        write_step_summary(msg)
-        sys.exit(1)
-
-    # An empty labels input (e.g. a workflow override of `labels: ''`)
-    # must not be passed through empty - file_alert can never find an
-    # existing issue without a label to search on, so every run would
-    # create a new one. Fall back to the default and warn instead of
-    # silently flooding the repo.
-    labels = config.labels
-    if not labels:
-        labels = list(DEFAULT_LABELS)
-        report(f"⚠️ **Empty `labels` input - falling back to default labels:** {', '.join(labels)}")
-
-    # A non-dry-run needs a client to file with. Checked here, before any
-    # network I/O, rather than separately at each filing site further down -
-    # that duplicated the same check and let a doomed run burn a 45 MB
-    # snapshot download before failing.
-    client = None
-    if not config.dry_run:
-        if not (config.token and config.repo):
-            print("ERROR: token and GITHUB_REPOSITORY must be set for non-dry-run mode", file=sys.stderr)
-            sys.exit(1)
-        client = IssueClient(config.repo, config.token)
+    _validate_mode(config.mode)
+    labels = _resolve_labels(config.labels)
+    client = _init_client(config)
 
     # Load watchlist
     print(f"Loading watchlist from {config.watchlist_path}...")
     watchlist = load_watchlist(config.watchlist_path)
-
     if not watchlist:
         report(
             f"⚠️ **Watchlist is empty**\n\n"
@@ -202,50 +337,13 @@ def run(config: Config) -> None:
     latest_rows = download_snapshot(config.snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields)
     print(f"Downloaded {len(latest_rows)} rows")
 
-    # Check freshness
-    is_fresh, max_date_str = check_snapshot_freshness(latest_rows, config.max_snapshot_age_days)
-
-    if not is_fresh:
-        msg = (
-            f"⚠️ **Snapshot is stale**\n\nLatest snapshot is dated {max_date_str or 'unknown'}, "
-            f"which is older than {config.max_snapshot_age_days} days.\n\n"
-            "This typically indicates the scanning engine has not run recently. "
-            "Please investigate the upstream system before acting on any alerts."
-        )
-        report(msg)
-
-        if config.dry_run:
-            sys.exit(0)
-
-        result = file_alert(client, "Site Scanning data is stale", msg, labels, stream='staleness')
-        print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
-
-        if config.fail_on_alert:
-            print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
-            sys.exit(1)
-
-        sys.exit(0)
-
-    print(f"Snapshot freshness OK (dated {max_date_str})")
-
-    # Recovery from staleness is reported in the step summary only -
-    # there's no issue to clear or comment on, since staleness alerts
-    # are filed (not tracked) per finding.
+    _check_freshness_or_exit(config, latest_rows, labels, client)
 
     # Filter to watchlist
     filtered_latest = filter_to_watchlist(latest_rows, watchlist)
     print(f"Filtered to {len(filtered_latest)} monitored sites")
 
-    unmatched_entries = find_unmatched_entries(latest_rows, watchlist)
-    if unmatched_entries:
-        unmatched_list = '\n'.join(f"  - {entry}" for entry in unmatched_entries[:10])
-        if len(unmatched_entries) > 10:
-            unmatched_list += f"\n  ... and {len(unmatched_entries) - 10} more"
-
-        report(
-            f"⚠️ **{len(unmatched_entries)} watchlist entries matched nothing**\n\n{unmatched_list}\n\n"
-            "Check for typos or verify that these domains exist in the Site Scanning index."
-        )
+    _warn_unmatched_entries(latest_rows, watchlist)
 
     if not filtered_latest:
         sys.exit(0)
@@ -256,49 +354,10 @@ def run(config: Config) -> None:
 
     # Change mode
     if config.mode in ('change', 'both'):
-        print(f"Downloading previous snapshot from {config.previous_snapshot_url}...")
-        previous_rows = download_snapshot(config.previous_snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields)
-        print(f"Downloaded {len(previous_rows)} rows")
-
-        # Custom fields are only usable for change detection if present
-        # on both sides of the diff - a field missing from one side
-        # would otherwise appear as a spurious '' -> value change on
-        # every row.
-        available_fields = set(latest_rows[0].keys()) & set(previous_rows[0].keys())
-        effective_fields = [f for f in config.fields if f in available_fields]
-        dropped_fields = [f for f in config.fields if f not in available_fields]
-        if dropped_fields:
-            report(
-                f"⚠️ **Unrecognized monitoring field(s) skipped:** {', '.join(dropped_fields)}\n\n"
-                "These are not present in the Site Scanning snapshot and will not be monitored. "
-                "Check for typos against the Site Scanning Data Dictionary."
-            )
-
-        # Check rotation. A stalled rotation means there's no fresh diff
-        # to evaluate, but that's no reason to skip state-mode checks -
-        # an active outage doesn't wait for the daily snapshot rotation.
-        rotation_stalled = not has_snapshot_rotated(latest_rows, previous_rows)
-        if rotation_stalled:
-            report(
-                "ℹ️ **Snapshot has not rotated**\n\nLatest and previous snapshots have identical scan "
-                "dates. This usually means the workflow ran multiple times before the daily rotation "
-                "at 15:00 UTC.\n\nChange detection skipped for this run; state checks (if enabled) "
-                "still ran against the current data."
-            )
-        else:
-            filtered_previous = filter_to_watchlist(previous_rows, watchlist)
-
-            ignore_transitions = parse_ignore_transitions(config.ignore_transitions_str)
-
-            change_alerts = evaluate_change_diff(
-                filtered_latest,
-                filtered_previous,
-                effective_fields,
-                config.ignore_blank_transitions,
-                ignore_transitions
-            )
-            print(f"Found {len(change_alerts)} change alerts")
-            all_alerts.extend(change_alerts)
+        change_alerts, rotation_stalled = _evaluate_changes(
+            config, latest_rows, filtered_latest, watchlist
+        )
+        all_alerts.extend(change_alerts)
 
     # State mode
     if config.mode in ('state', 'both'):
@@ -336,32 +395,9 @@ def run(config: Config) -> None:
         )
         sys.exit(0)
 
-    # Render
+    # Render and publish
     body = render_alerts(all_alerts, config.max_changes)
-
-    # Output
-    if config.dry_run:
-        print("\n" + "="*60)
-        print("DRY RUN - Issue body preview:")
-        print("="*60)
-        print(body)
-        print("="*60)
-        write_step_summary(f"## Dry Run\n\n{body}")
-    else:
-        result = file_alert(client, config.issue_title, body, labels, stream='alerts')
-
-        action = result['action']
-        url = result.get('issue_url', 'N/A')
-
-        print(f"\nIssue filing: {action}")
-        print(f"Issue URL: {url}")
-
-        summary = f"## Site Scanning Alerts\n\n**Action:** {action}\n\n**Issue:** {url}\n\n**Alerts found:** {len(all_alerts)}"
-        write_step_summary(summary)
-
-        if config.fail_on_alert:
-            print("\nWorkflow configured to fail on alerts (fail_on_alert=true)")
-            sys.exit(1)
+    _publish_alerts(config, client, body, labels, len(all_alerts))
 
     print("\nCompleted successfully")
     sys.exit(0)

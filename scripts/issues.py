@@ -24,6 +24,26 @@ MAX_ISSUE_PAGES = 5
 MARKER_PREFIX = '<!-- site-scanning-alert:'
 
 
+def _find_issue_with_marker(issues: List[Dict], marker: str) -> Optional[Dict]:
+    """Scan a list of issue objects for one containing the specified marker."""
+    for issue in issues:
+        # Skip pull requests (they appear in /issues but have a pull_request key)
+        if 'pull_request' in issue:
+            continue
+
+        # GitHub returns body: null for issues created without a
+        # description, so `issue.get('body', '')` isn't enough -
+        # the key is present with value None.
+        body = issue.get('body') or ''
+        if marker in body:
+            return {
+                'number': issue['number'],
+                'html_url': issue['html_url'],
+                'body': body
+            }
+    return None
+
+
 class IssueClient:
     """
     GitHub issue client for alert filing.
@@ -102,41 +122,26 @@ class IssueClient:
         # Encode each label individually so the comma separator itself
         # stays a literal comma (GitHub reads it as label1 AND label2).
         label_str = ','.join(urllib.parse.quote_plus(label) for label in labels)
-        page = 1
-        while True:
+        for page in range(1, MAX_ISSUE_PAGES + 1):
             path = f"/issues?labels={label_str}&state=open&per_page=100&page={page}"
             issues = self._request('GET', path)
 
             if not issues:
                 return None
 
-            for issue in issues:
-                # Skip pull requests (they appear in /issues but have a pull_request key)
-                if 'pull_request' in issue:
-                    continue
-
-                # GitHub returns body: null for issues created without a
-                # description, so `issue.get('body', '')` isn't enough -
-                # the key is present with value None.
-                body = issue.get('body') or ''
-                if marker in body:
-                    return {
-                        'number': issue['number'],
-                        'html_url': issue['html_url'],
-                        'body': body
-                    }
+            matched = _find_issue_with_marker(issues, marker)
+            if matched:
+                return matched
 
             if len(issues) < 100:
                 return None
 
-            page += 1
-            if page > MAX_ISSUE_PAGES:
-                print(
-                    f"WARNING: find_open_issue hit the {MAX_ISSUE_PAGES}-page cap "
-                    f"({MAX_ISSUE_PAGES * 100} issues) without finding a match; "
-                    "treating as not found. Consider closing stale open issues."
-                )
-                return None
+        print(
+            f"WARNING: find_open_issue hit the {MAX_ISSUE_PAGES}-page cap "
+            f"({MAX_ISSUE_PAGES * 100} issues) without finding a match; "
+            "treating as not found. Consider closing stale open issues."
+        )
+        return None
 
     def create_issue(
         self,

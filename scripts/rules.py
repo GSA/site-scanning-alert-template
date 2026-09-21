@@ -6,7 +6,7 @@ Implements change-detection (latest vs previous) and state-check (bad current va
 with configurable noise suppression.
 """
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from collections import Counter
 
 
@@ -24,12 +24,46 @@ class Alert:
         """Format as issue body line."""
         if self.alert_type == 'state':
             return f"initial_domain: {self.domain}\n{self.field}: {self.new_value}"
-        elif self.alert_type == 'corpus':
+        if self.alert_type == 'corpus':
             return f"initial_domain: {self.domain}\n{self.new_value}"  # message in new_value
-        else:  # 'change'
-            old = '(no data)' if self.old_value == '' else self.old_value
-            new = '(no data)' if self.new_value == '' else self.new_value
-            return f"initial_domain: {self.domain}\n{self.field}: {old} -> {new}"
+
+        old = self.old_value or '(no data)'
+        new = self.new_value or '(no data)'
+        return f"initial_domain: {self.domain}\n{self.field}: {old} -> {new}"
+
+
+def _should_ignore_change(
+    field: str,
+    old: str,
+    new: str,
+    ignore_blank_transitions: bool,
+    ignore_transitions: Set[Tuple[str, str, str]]
+) -> bool:
+    """Determine whether a field value transition should be ignored."""
+    if old == new:
+        return True
+    if ignore_blank_transitions and (not old or not new):
+        return True
+    return (field, old, new) in ignore_transitions
+
+
+def _diff_domain_fields(
+    domain: str,
+    prev_row: Dict[str, str],
+    latest_row: Dict[str, str],
+    fields: List[str],
+    ignore_blank_transitions: bool,
+    ignore_transitions: Set[Tuple[str, str, str]]
+) -> List[Alert]:
+    """Find changed fields between previous and latest snapshots for a single domain."""
+    alerts = []
+    for field in fields:
+        old = prev_row.get(field, '')
+        new = latest_row.get(field, '')
+        if _should_ignore_change(field, old, new, ignore_blank_transitions, ignore_transitions):
+            continue
+        alerts.append(Alert(domain, field, old, new, 'change'))
+    return alerts
 
 
 def evaluate_change_diff(
@@ -61,38 +95,46 @@ def evaluate_change_diff(
     
     alerts = []
     
-    # Check for changes in common domains
-    for domain in latest_map:
-        if domain not in prev_map:
-            # New domain in corpus
+    # Check for changes in common domains or new domains
+    for domain, latest_row in latest_map.items():
+        prev_row = prev_map.get(domain)
+        if prev_row is None:
             alerts.append(Alert(domain, '', '', 'newly in snapshot', 'corpus'))
             continue
         
-        prev_row = prev_map[domain]
-        latest_row = latest_map[domain]
-        
-        for field in fields:
-            old = prev_row.get(field, '')
-            new = latest_row.get(field, '')
-            
-            if old == new:
-                continue
-            
-            # Noise suppression
-            if ignore_blank_transitions:
-                if old == '' or new == '':
-                    continue
-            
-            if (field, old, new) in ignore_transitions:
-                continue
-            
-            alerts.append(Alert(domain, field, old, new, 'change'))
+        alerts.extend(_diff_domain_fields(
+            domain, prev_row, latest_row, fields, ignore_blank_transitions, ignore_transitions
+        ))
     
     # Check for domains that disappeared
     for domain in prev_map:
         if domain not in latest_map:
             alerts.append(Alert(domain, '', '', 'no longer in snapshot', 'corpus'))
     
+    return alerts
+
+
+def _check_domain_state(
+    row: Dict[str, str],
+    alert_on_status_codes: Set[str],
+    alert_on_scan_status: Set[str],
+    alert_on_not_live: bool
+) -> List[Alert]:
+    """Check a single row for state alert conditions."""
+    domain = row['initial_domain']
+    alerts = []
+
+    status_code = row.get('status_code', '')
+    if status_code in alert_on_status_codes:
+        alerts.append(Alert(domain, 'status_code', '', status_code, 'state'))
+
+    scan_status = row.get('primary_scan_status', '')
+    if scan_status in alert_on_scan_status:
+        alerts.append(Alert(domain, 'primary_scan_status', '', scan_status, 'state'))
+
+    if alert_on_not_live and row.get('live', '').lower() == 'false':
+        alerts.append(Alert(domain, 'live', '', 'false', 'state'))
+
     return alerts
 
 
@@ -115,27 +157,18 @@ def evaluate_state_check(
         List of Alert objects
     """
     alerts = []
-    
     for row in latest_rows:
-        domain = row['initial_domain']
-        
-        # Check status_code
-        status_code = row.get('status_code', '')
-        if status_code in alert_on_status_codes:
-            alerts.append(Alert(domain, 'status_code', '', status_code, 'state'))
-        
-        # Check primary_scan_status
-        scan_status = row.get('primary_scan_status', '')
-        if scan_status in alert_on_scan_status:
-            alerts.append(Alert(domain, 'primary_scan_status', '', scan_status, 'state'))
-        
-        # Check live
-        if alert_on_not_live:
-            live = row.get('live', '').lower()
-            if live == 'false':
-                alerts.append(Alert(domain, 'live', '', 'false', 'state'))
-    
+        alerts.extend(_check_domain_state(
+            row, alert_on_status_codes, alert_on_scan_status, alert_on_not_live
+        ))
     return alerts
+
+
+def _alert_key(alert: Alert) -> Tuple[str, ...]:
+    """Compute deduplication key for an alert."""
+    if alert.alert_type == 'corpus':
+        return (alert.domain, 'corpus', alert.new_value)
+    return (alert.domain, alert.field)
 
 
 def dedupe_alerts(alerts: List[Alert]) -> List[Alert]:
@@ -162,10 +195,7 @@ def dedupe_alerts(alerts: List[Alert]) -> List[Alert]:
     deduped = []
     seen = set()
     for alert in alerts:
-        if alert.alert_type == 'corpus':
-            key = (alert.domain, 'corpus', alert.new_value)
-        else:
-            key = (alert.domain, alert.field)
+        key = _alert_key(alert)
 
         if alert.alert_type == 'state' and key in change_keys:
             # A change alert for this domain/field already covers this.
@@ -233,6 +263,19 @@ def render_alerts(alerts: List[Alert], max_changes: int) -> str:
     return header + "\n\n".join(lines) + "\n\nPlease investigate as appropriate."
 
 
+def _parse_single_transition(entry: str) -> Optional[Tuple[str, str, str]]:
+    """Parse one 'field:old->new' entry into a (field, old, new) tuple."""
+    entry = entry.strip()
+    if not entry:
+        return None
+    try:
+        field_part, transition = entry.split(':', 1)
+        old, new = transition.split('->', 1)
+        return (field_part.strip(), old.strip(), new.strip())
+    except ValueError:
+        return None
+
+
 def parse_ignore_transitions(ignore_str: str) -> Set[Tuple[str, str, str]]:
     """
     Parse comma-separated ignore_transitions input.
@@ -247,16 +290,8 @@ def parse_ignore_transitions(ignore_str: str) -> Set[Tuple[str, str, str]]:
     
     result = set()
     for entry in ignore_str.split(','):
-        entry = entry.strip()
-        if not entry:
-            continue
-        
-        try:
-            field_part, transition = entry.split(':', 1)
-            old, new = transition.split('->', 1)
-            result.add((field_part.strip(), old.strip(), new.strip()))
-        except ValueError:
-            # Malformed entry, skip
-            continue
+        parsed = _parse_single_transition(entry)
+        if parsed:
+            result.add(parsed)
     
     return result
