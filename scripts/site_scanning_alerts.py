@@ -5,6 +5,7 @@ Site Scanning Alerts - Entrypoint
 Monitors federal websites for status changes and configuration issues using
 GSA Site Scanning data.
 """
+
 import os
 import sys
 import traceback
@@ -37,12 +38,12 @@ from snapshot import (
 # (e.g. a workflow override of `labels: ''`). file_alert requires at
 # least one label - see its docstring - so this must never be passed
 # through empty.
-DEFAULT_LABELS = ['site-scanning-alert']
+DEFAULT_LABELS = ["site-scanning-alert"]
 
 # Modes accepted by the `mode` input. Anything else must hard-fail before
 # any network I/O, rather than silently skipping both evaluators and
 # falling through to a false "condition cleared".
-VALID_MODES = ('change', 'state', 'both')
+VALID_MODES = ("change", "state", "both")
 
 # Cap on watchlist entries listed individually in the unmatched-entries
 # warning before it collapses into a count.
@@ -51,6 +52,7 @@ MAX_UNMATCHED_LISTED = 10
 
 class Config(NamedTuple):
     """Parsed `INPUT_*`/`GITHUB_*` environment variables set by action.yml."""
+
     watchlist_path: str
     mode: str
     fields: List[str]
@@ -76,22 +78,22 @@ def load_watchlist(path: str) -> List[str]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Watchlist file not found: {path}")
 
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         lines = (line.strip() for line in f)
-        return [line for line in lines if line and not line.startswith('#')]
+        return [line for line in lines if line and not line.startswith("#")]
 
 
 def parse_csv_list(value: str) -> List[str]:
     """Parse a comma-separated input into a list, preserving order and dropping blanks."""
-    return [item.strip() for item in value.split(',') if item.strip()]
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def write_step_summary(content: str) -> None:
     """Write to GitHub Actions step summary if available."""
-    summary_file = os.getenv('GITHUB_STEP_SUMMARY')
+    summary_file = os.getenv("GITHUB_STEP_SUMMARY")
     if summary_file:
-        with open(summary_file, 'a') as f:
-            f.write(content + '\n')
+        with open(summary_file, "a") as f:
+            f.write(content + "\n")
 
 
 def report(msg: str) -> None:
@@ -100,43 +102,43 @@ def report(msg: str) -> None:
     write_step_summary(msg)
 
 
-def _env(name: str, default: str = '') -> str:
+def _env(name: str, default: str = "") -> str:
     """Read an `INPUT_*` action input."""
-    return os.getenv(f'INPUT_{name.upper()}', default)
+    return os.getenv(f"INPUT_{name.upper()}", default)
 
 
 def _env_flag(name: str) -> bool:
     """Read a boolean `INPUT_*` action input (default false)."""
-    return _env(name, 'false').lower() == 'true'
+    return _env(name, "false").lower() == "true"
 
 
 def read_config() -> Config:
     """Read inputs from environment (set by action.yml)."""
     return Config(
-        watchlist_path=_env('watchlist', 'watchlist.txt'),
-        mode=_env('mode', 'both'),
-        fields=parse_csv_list(_env('fields', 'live,status_code,primary_scan_status')),
-        alert_on_status_codes=set(parse_csv_list(_env('alert_on_status_codes', '500,502,503,504'))),
-        alert_on_scan_status=set(parse_csv_list(_env('alert_on_scan_status'))),
-        alert_on_not_live=_env_flag('alert_on_not_live'),
-        ignore_blank_transitions=_env_flag('ignore_blank_transitions'),
-        ignore_transitions_str=_env('ignore_transitions'),
-        max_changes=int(_env('max_changes', '25')),
-        labels=parse_csv_list(_env('labels', 'site-scanning-alert')),
-        issue_title=_env('issue_title', 'Possible website issues'),
+        watchlist_path=_env("watchlist", "watchlist.txt"),
+        mode=_env("mode", "both"),
+        fields=parse_csv_list(_env("fields", "live,status_code,primary_scan_status")),
+        alert_on_status_codes=set(parse_csv_list(_env("alert_on_status_codes", "500,502,503,504"))),
+        alert_on_scan_status=set(parse_csv_list(_env("alert_on_scan_status"))),
+        alert_on_not_live=_env_flag("alert_on_not_live"),
+        ignore_blank_transitions=_env_flag("ignore_blank_transitions"),
+        ignore_transitions_str=_env("ignore_transitions"),
+        max_changes=int(_env("max_changes", "25")),
+        labels=parse_csv_list(_env("labels", "site-scanning-alert")),
+        issue_title=_env("issue_title", "Possible website issues"),
         snapshot_url=_env(
-            'snapshot_url',
-            'https://api.gsa.gov/technology/site-scanning/data/site-scanning-latest.csv',
+            "snapshot_url",
+            "https://api.gsa.gov/technology/site-scanning/data/site-scanning-latest.csv",
         ),
         previous_snapshot_url=_env(
-            'previous_snapshot_url',
-            'https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv',
+            "previous_snapshot_url",
+            "https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv",
         ),
-        max_snapshot_age_days=int(_env('max_snapshot_age_days', '3')),
-        token=_env('token'),
-        fail_on_alert=_env_flag('fail_on_alert'),
-        dry_run=_env_flag('dry_run'),
-        repo=os.getenv('GITHUB_REPOSITORY', ''),
+        max_snapshot_age_days=int(_env("max_snapshot_age_days", "3")),
+        token=_env("token"),
+        fail_on_alert=_env_flag("fail_on_alert"),
+        dry_run=_env_flag("dry_run"),
+        repo=os.getenv("GITHUB_REPOSITORY", ""),
     )
 
 
@@ -147,7 +149,7 @@ def _fail(msg: str) -> NoReturn:
     sys.exit(1)
 
 
-def _exit_on_alert(config: Config, success_msg: str = '') -> NoReturn:
+def _exit_on_alert(config: Config, success_msg: str = "") -> NoReturn:
     """
     Exit 1 if the workflow is configured to fail on alerts, else exit 0
     after printing success_msg (if given).
@@ -170,7 +172,9 @@ def _resolve_labels(labels: List[str]) -> List[str]:
     """Ensure at least one label is provided, falling back to default if empty."""
     if labels:
         return labels
-    report(f"⚠️ **Empty `labels` input - falling back to default labels:** {', '.join(DEFAULT_LABELS)}")
+    report(
+        f"⚠️ **Empty `labels` input - falling back to default labels:** {', '.join(DEFAULT_LABELS)}"
+    )
     return list(DEFAULT_LABELS)
 
 
@@ -206,7 +210,7 @@ def _check_freshness_or_exit(
     if config.dry_run:
         sys.exit(0)
 
-    result = file_alert(client, "Site Scanning data is stale", msg, labels, stream='staleness')
+    result = file_alert(client, "Site Scanning data is stale", msg, labels, stream="staleness")
     print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
 
     _exit_on_alert(config)
@@ -218,7 +222,7 @@ def _warn_unmatched_entries(latest_rows: List[Row], watchlist: List[str]) -> Non
     if not unmatched:
         return
 
-    listed = '\n'.join(f"  - {entry}" for entry in unmatched[:MAX_UNMATCHED_LISTED])
+    listed = "\n".join(f"  - {entry}" for entry in unmatched[:MAX_UNMATCHED_LISTED])
     if len(unmatched) > MAX_UNMATCHED_LISTED:
         listed += f"\n  ... and {len(unmatched) - MAX_UNMATCHED_LISTED} more"
 
@@ -262,7 +266,9 @@ def _evaluate_changes(
     """
     print(f"Downloading previous snapshot from {config.previous_snapshot_url}...")
     previous_rows = download_snapshot(
-        config.previous_snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields,
+        config.previous_snapshot_url,
+        REQUIRED_COLUMNS,
+        optional_columns=config.fields,
     )
     print(f"Downloaded {len(previous_rows)} rows")
 
@@ -309,9 +315,9 @@ def _publish_alerts(
         print("\nCompleted successfully")
         sys.exit(0)
 
-    result = file_alert(client, config.issue_title, body, labels, stream='alerts')
-    action = result['action']
-    url = result.get('issue_url', 'N/A')
+    result = file_alert(client, config.issue_title, body, labels, stream="alerts")
+    action = result["action"]
+    url = result.get("issue_url", "N/A")
 
     print(f"\nIssue filing: {action}")
     print(f"Issue URL: {url}")
@@ -338,13 +344,16 @@ def _collect_alerts(
     alerts: List[Alert] = []
     rotation_stalled = False
 
-    if config.mode in ('change', 'both'):
+    if config.mode in ("change", "both"):
         change_alerts, rotation_stalled = _evaluate_changes(
-            config, latest_rows, filtered_latest, watchlist,
+            config,
+            latest_rows,
+            filtered_latest,
+            watchlist,
         )
         alerts.extend(change_alerts)
 
-    if config.mode in ('state', 'both'):
+    if config.mode in ("state", "both"):
         state_alerts = evaluate_state_check(
             filtered_latest,
             config.alert_on_status_codes,
@@ -414,7 +423,9 @@ def run(config: Config) -> NoReturn:
     # custom `fields` present in the CSV, without hard-failing when one
     # is missing (that's reported as a warning further down instead).
     print(f"Downloading latest snapshot from {config.snapshot_url}...")
-    latest_rows = download_snapshot(config.snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields)
+    latest_rows = download_snapshot(
+        config.snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields
+    )
     print(f"Downloaded {len(latest_rows)} rows")
 
     _check_freshness_or_exit(config, latest_rows, labels, client)
@@ -428,14 +439,21 @@ def run(config: Config) -> NoReturn:
         sys.exit(0)
 
     all_alerts, rotation_stalled = _collect_alerts(
-        config, latest_rows, filtered_latest, watchlist,
+        config,
+        latest_rows,
+        filtered_latest,
+        watchlist,
     )
 
     if not all_alerts:
         _exit_no_alerts(rotation_stalled)
 
     _publish_alerts(
-        config, client, render_alerts(all_alerts, config.max_changes), labels, len(all_alerts),
+        config,
+        client,
+        render_alerts(all_alerts, config.max_changes),
+        labels,
+        len(all_alerts),
     )
 
 
@@ -456,5 +474,5 @@ def main():
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
