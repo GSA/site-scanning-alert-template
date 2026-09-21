@@ -5,6 +5,7 @@ Site Scanning Alerts - Entrypoint
 Monitors federal websites for status changes and configuration issues using
 GSA Site Scanning data.
 """
+
 import os
 import sys
 import traceback
@@ -13,36 +14,36 @@ from typing import List, NamedTuple, NoReturn, Optional, Set, Tuple
 # Add scripts directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from issues import IssueClient, file_alert
+from rules import (
+    Alert,
+    dedupe_alerts,
+    evaluate_change_diff,
+    evaluate_state_check,
+    parse_ignore_transitions,
+    render_alerts,
+)
 from snapshot import (
+    REQUIRED_COLUMNS,
+    Row,
+    SnapshotError,
+    check_snapshot_freshness,
     download_snapshot,
     filter_to_watchlist,
     find_unmatched_entries,
-    check_snapshot_freshness,
     has_snapshot_rotated,
-    REQUIRED_COLUMNS,
-    Row,
-    SnapshotError
 )
-from rules import (
-    evaluate_change_diff,
-    evaluate_state_check,
-    dedupe_alerts,
-    render_alerts,
-    parse_ignore_transitions,
-    Alert
-)
-from issues import IssueClient, file_alert
 
 # Fallback labels used when the `labels` input parses to an empty list
 # (e.g. a workflow override of `labels: ''`). file_alert requires at
 # least one label - see its docstring - so this must never be passed
 # through empty.
-DEFAULT_LABELS = ['site-scanning-alert']
+DEFAULT_LABELS = ["site-scanning-alert"]
 
 # Modes accepted by the `mode` input. Anything else must hard-fail before
 # any network I/O, rather than silently skipping both evaluators and
 # falling through to a false "condition cleared".
-VALID_MODES = ('change', 'state', 'both')
+VALID_MODES = ("change", "state", "both")
 
 # Cap on watchlist entries listed individually in the unmatched-entries
 # warning before it collapses into a count.
@@ -51,6 +52,7 @@ MAX_UNMATCHED_LISTED = 10
 
 class Config(NamedTuple):
     """Parsed `INPUT_*`/`GITHUB_*` environment variables set by action.yml."""
+
     watchlist_path: str
     mode: str
     fields: List[str]
@@ -76,22 +78,22 @@ def load_watchlist(path: str) -> List[str]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Watchlist file not found: {path}")
 
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         lines = (line.strip() for line in f)
-        return [line for line in lines if line and not line.startswith('#')]
+        return [line for line in lines if line and not line.startswith("#")]
 
 
 def parse_csv_list(value: str) -> List[str]:
     """Parse a comma-separated input into a list, preserving order and dropping blanks."""
-    return [item.strip() for item in value.split(',') if item.strip()]
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def write_step_summary(content: str) -> None:
     """Write to GitHub Actions step summary if available."""
-    summary_file = os.getenv('GITHUB_STEP_SUMMARY')
+    summary_file = os.getenv("GITHUB_STEP_SUMMARY")
     if summary_file:
-        with open(summary_file, 'a') as f:
-            f.write(content + '\n')
+        with open(summary_file, "a") as f:
+            f.write(content + "\n")
 
 
 def report(msg: str) -> None:
@@ -100,43 +102,43 @@ def report(msg: str) -> None:
     write_step_summary(msg)
 
 
-def _env(name: str, default: str = '') -> str:
+def _env(name: str, default: str = "") -> str:
     """Read an `INPUT_*` action input."""
-    return os.getenv(f'INPUT_{name.upper()}', default)
+    return os.getenv(f"INPUT_{name.upper()}", default)
 
 
 def _env_flag(name: str) -> bool:
     """Read a boolean `INPUT_*` action input (default false)."""
-    return _env(name, 'false').lower() == 'true'
+    return _env(name, "false").lower() == "true"
 
 
 def read_config() -> Config:
     """Read inputs from environment (set by action.yml)."""
     return Config(
-        watchlist_path=_env('watchlist', 'watchlist.txt'),
-        mode=_env('mode', 'both'),
-        fields=parse_csv_list(_env('fields', 'live,status_code,primary_scan_status')),
-        alert_on_status_codes=set(parse_csv_list(_env('alert_on_status_codes', '500,502,503,504'))),
-        alert_on_scan_status=set(parse_csv_list(_env('alert_on_scan_status'))),
-        alert_on_not_live=_env_flag('alert_on_not_live'),
-        ignore_blank_transitions=_env_flag('ignore_blank_transitions'),
-        ignore_transitions_str=_env('ignore_transitions'),
-        max_changes=int(_env('max_changes', '25')),
-        labels=parse_csv_list(_env('labels', 'site-scanning-alert')),
-        issue_title=_env('issue_title', 'Possible website issues'),
+        watchlist_path=_env("watchlist", "watchlist.txt"),
+        mode=_env("mode", "both"),
+        fields=parse_csv_list(_env("fields", "live,status_code,primary_scan_status")),
+        alert_on_status_codes=set(parse_csv_list(_env("alert_on_status_codes", "500,502,503,504"))),
+        alert_on_scan_status=set(parse_csv_list(_env("alert_on_scan_status"))),
+        alert_on_not_live=_env_flag("alert_on_not_live"),
+        ignore_blank_transitions=_env_flag("ignore_blank_transitions"),
+        ignore_transitions_str=_env("ignore_transitions"),
+        max_changes=int(_env("max_changes", "25")),
+        labels=parse_csv_list(_env("labels", "site-scanning-alert")),
+        issue_title=_env("issue_title", "Possible website issues"),
         snapshot_url=_env(
-            'snapshot_url',
-            'https://api.gsa.gov/technology/site-scanning/data/site-scanning-latest.csv'
+            "snapshot_url",
+            "https://api.gsa.gov/technology/site-scanning/data/site-scanning-latest.csv",
         ),
         previous_snapshot_url=_env(
-            'previous_snapshot_url',
-            'https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv'
+            "previous_snapshot_url",
+            "https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv",
         ),
-        max_snapshot_age_days=int(_env('max_snapshot_age_days', '3')),
-        token=_env('token'),
-        fail_on_alert=_env_flag('fail_on_alert'),
-        dry_run=_env_flag('dry_run'),
-        repo=os.getenv('GITHUB_REPOSITORY', ''),
+        max_snapshot_age_days=int(_env("max_snapshot_age_days", "3")),
+        token=_env("token"),
+        fail_on_alert=_env_flag("fail_on_alert"),
+        dry_run=_env_flag("dry_run"),
+        repo=os.getenv("GITHUB_REPOSITORY", ""),
     )
 
 
@@ -147,7 +149,7 @@ def _fail(msg: str) -> NoReturn:
     sys.exit(1)
 
 
-def _exit_on_alert(config: Config, success_msg: str = '') -> NoReturn:
+def _exit_on_alert(config: Config, success_msg: str = "") -> NoReturn:
     """
     Exit 1 if the workflow is configured to fail on alerts, else exit 0
     after printing success_msg (if given).
@@ -170,7 +172,9 @@ def _resolve_labels(labels: List[str]) -> List[str]:
     """Ensure at least one label is provided, falling back to default if empty."""
     if labels:
         return labels
-    report(f"⚠️ **Empty `labels` input - falling back to default labels:** {', '.join(DEFAULT_LABELS)}")
+    report(
+        f"⚠️ **Empty `labels` input - falling back to default labels:** {', '.join(DEFAULT_LABELS)}"
+    )
     return list(DEFAULT_LABELS)
 
 
@@ -187,7 +191,7 @@ def _check_freshness_or_exit(
     config: Config,
     latest_rows: List[Row],
     labels: List[str],
-    client: Optional[IssueClient]
+    client: Optional[IssueClient],
 ) -> None:
     """Validate snapshot freshness and exit if stale (filing staleness issue if configured)."""
     is_fresh, max_date_str = check_snapshot_freshness(latest_rows, config.max_snapshot_age_days)
@@ -206,7 +210,7 @@ def _check_freshness_or_exit(
     if config.dry_run:
         sys.exit(0)
 
-    result = file_alert(client, "Site Scanning data is stale", msg, labels, stream='staleness')
+    result = file_alert(client, "Site Scanning data is stale", msg, labels, stream="staleness")
     print(f"Staleness alert: {result['action']} - {result.get('issue_url', 'N/A')}")
 
     _exit_on_alert(config)
@@ -218,13 +222,13 @@ def _warn_unmatched_entries(latest_rows: List[Row], watchlist: List[str]) -> Non
     if not unmatched:
         return
 
-    listed = '\n'.join(f"  - {entry}" for entry in unmatched[:MAX_UNMATCHED_LISTED])
+    listed = "\n".join(f"  - {entry}" for entry in unmatched[:MAX_UNMATCHED_LISTED])
     if len(unmatched) > MAX_UNMATCHED_LISTED:
         listed += f"\n  ... and {len(unmatched) - MAX_UNMATCHED_LISTED} more"
 
     report(
         f"⚠️ **{len(unmatched)} watchlist entries matched nothing**\n\n{listed}\n\n"
-        "Check for typos or verify that these domains exist in the Site Scanning index."
+        "Check for typos or verify that these domains exist in the Site Scanning index.",
     )
 
 
@@ -243,7 +247,7 @@ def _resolve_fields(config: Config, latest_rows: List[Row], previous_rows: List[
         report(
             f"⚠️ **Unrecognized monitoring field(s) skipped:** {', '.join(dropped)}\n\n"
             "These are not present in the Site Scanning snapshot and will not be monitored. "
-            "Check for typos against the Site Scanning Data Dictionary."
+            "Check for typos against the Site Scanning Data Dictionary.",
         )
 
     return [f for f in config.fields if f in available]
@@ -253,7 +257,7 @@ def _evaluate_changes(
     config: Config,
     latest_rows: List[Row],
     filtered_latest: List[Row],
-    watchlist: List[str]
+    watchlist: List[str],
 ) -> Tuple[List[Alert], bool]:
     """Download previous snapshot and evaluate change diff.
 
@@ -262,7 +266,9 @@ def _evaluate_changes(
     """
     print(f"Downloading previous snapshot from {config.previous_snapshot_url}...")
     previous_rows = download_snapshot(
-        config.previous_snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields
+        config.previous_snapshot_url,
+        REQUIRED_COLUMNS,
+        optional_columns=config.fields,
     )
     print(f"Downloaded {len(previous_rows)} rows")
 
@@ -276,7 +282,7 @@ def _evaluate_changes(
             "ℹ️ **Snapshot has not rotated**\n\nLatest and previous snapshots have identical scan "
             "dates. This usually means the workflow ran multiple times before the daily rotation "
             "at 15:00 UTC.\n\nChange detection skipped for this run; state checks (if enabled) "
-            "still ran against the current data."
+            "still ran against the current data.",
         )
         return [], True
 
@@ -285,7 +291,7 @@ def _evaluate_changes(
         filter_to_watchlist(previous_rows, watchlist),
         effective_fields,
         config.ignore_blank_transitions,
-        parse_ignore_transitions(config.ignore_transitions_str)
+        parse_ignore_transitions(config.ignore_transitions_str),
     )
     print(f"Found {len(change_alerts)} change alerts")
     return change_alerts, False
@@ -296,7 +302,7 @@ def _publish_alerts(
     client: Optional[IssueClient],
     body: str,
     labels: List[str],
-    alert_count: int
+    alert_count: int,
 ) -> NoReturn:
     """Output alert preview in dry run, or file a GitHub issue. Always exits."""
     if config.dry_run:
@@ -309,15 +315,15 @@ def _publish_alerts(
         print("\nCompleted successfully")
         sys.exit(0)
 
-    result = file_alert(client, config.issue_title, body, labels, stream='alerts')
-    action = result['action']
-    url = result.get('issue_url', 'N/A')
+    result = file_alert(client, config.issue_title, body, labels, stream="alerts")
+    action = result["action"]
+    url = result.get("issue_url", "N/A")
 
     print(f"\nIssue filing: {action}")
     print(f"Issue URL: {url}")
     write_step_summary(
         f"## Site Scanning Alerts\n\n**Action:** {action}\n\n"
-        f"**Issue:** {url}\n\n**Alerts found:** {alert_count}"
+        f"**Issue:** {url}\n\n**Alerts found:** {alert_count}",
     )
 
     _exit_on_alert(config, "\nCompleted successfully")
@@ -327,7 +333,7 @@ def _collect_alerts(
     config: Config,
     latest_rows: List[Row],
     filtered_latest: List[Row],
-    watchlist: List[str]
+    watchlist: List[str],
 ) -> Tuple[List[Alert], bool]:
     """
     Run the evaluators enabled by `mode` and return their deduped findings.
@@ -338,18 +344,21 @@ def _collect_alerts(
     alerts: List[Alert] = []
     rotation_stalled = False
 
-    if config.mode in ('change', 'both'):
+    if config.mode in ("change", "both"):
         change_alerts, rotation_stalled = _evaluate_changes(
-            config, latest_rows, filtered_latest, watchlist
+            config,
+            latest_rows,
+            filtered_latest,
+            watchlist,
         )
         alerts.extend(change_alerts)
 
-    if config.mode in ('state', 'both'):
+    if config.mode in ("state", "both"):
         state_alerts = evaluate_state_check(
             filtered_latest,
             config.alert_on_status_codes,
             config.alert_on_scan_status,
-            config.alert_on_not_live
+            config.alert_on_not_live,
         )
         print(f"Found {len(state_alerts)} state alerts")
         alerts.extend(state_alerts)
@@ -370,7 +379,7 @@ def _load_watchlist_or_exit(path: str) -> List[str]:
             f"⚠️ **Watchlist is empty**\n\n"
             f"The watchlist file `{path}` contains no active entries "
             "(only comments or blank lines).\n\nAdd domains to monitor, one per line. "
-            "See the watchlist file for syntax examples."
+            "See the watchlist file for syntax examples.",
         )
         sys.exit(0)
 
@@ -385,7 +394,7 @@ def _exit_no_alerts(rotation_stalled: bool) -> NoReturn:
         # to report, and nothing new to file.
         report(
             "ℹ️ **No new information this run**\n\nSnapshot has not rotated, so change detection "
-            "was skipped, and no state-check findings were found. Skipping issue filing."
+            "was skipped, and no state-check findings were found. Skipping issue filing.",
         )
     else:
         # In change-only mode this just means "nothing changed today" (not
@@ -393,7 +402,7 @@ def _exit_no_alerts(rotation_stalled: bool) -> NoReturn:
         # 2), but either way there are no findings to file an issue for.
         report(
             "✅ **No alerts this run**\n\nAll monitored sites are operating as expected (or, in "
-            "`mode: change`, nothing changed since the last snapshot)."
+            "`mode: change`, nothing changed since the last snapshot).",
         )
     sys.exit(0)
 
@@ -414,7 +423,9 @@ def run(config: Config) -> NoReturn:
     # custom `fields` present in the CSV, without hard-failing when one
     # is missing (that's reported as a warning further down instead).
     print(f"Downloading latest snapshot from {config.snapshot_url}...")
-    latest_rows = download_snapshot(config.snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields)
+    latest_rows = download_snapshot(
+        config.snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields
+    )
     print(f"Downloaded {len(latest_rows)} rows")
 
     _check_freshness_or_exit(config, latest_rows, labels, client)
@@ -428,14 +439,21 @@ def run(config: Config) -> NoReturn:
         sys.exit(0)
 
     all_alerts, rotation_stalled = _collect_alerts(
-        config, latest_rows, filtered_latest, watchlist
+        config,
+        latest_rows,
+        filtered_latest,
+        watchlist,
     )
 
     if not all_alerts:
         _exit_no_alerts(rotation_stalled)
 
     _publish_alerts(
-        config, client, render_alerts(all_alerts, config.max_changes), labels, len(all_alerts)
+        config,
+        client,
+        render_alerts(all_alerts, config.max_changes),
+        labels,
+        len(all_alerts),
     )
 
 
@@ -456,5 +474,5 @@ def main():
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

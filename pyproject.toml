@@ -2,4 +2,58 @@
 name = "site-scanning-alert-template"
 version = "0.1.0"
 requires-python = ">=3.14"
+# Runtime is stdlib-only and MUST stay that way: action.yml invokes
+# scripts/site_scanning_alerts.py directly with no install step, so any
+# third-party import breaks every consumer at runtime. Dev tooling goes in
+# [dependency-groups] below, which consumers never install.
 dependencies = []
+
+# Lint/format tooling. CI-only; see .github/workflows/test.yml.
+# Install with: python3 -m pip install --group dev   (requires pip >= 25.1)
+[dependency-groups]
+dev = ["ruff==0.16.8"]
+
+[tool.ruff]
+# Inferred from requires-python, but stated so the 3.14 floor is visible here.
+target-version = "py314"
+line-length = 100
+# Lets ruff's isort see the flat scripts/ modules as first-party.
+src = [".", "scripts"]
+# Hard-fail on a mismatched local ruff rather than silently producing
+# different format output. Must match [dependency-groups].dev.
+required-version = "==0.16.8"
+
+[tool.ruff.lint]
+# Deliberately NOT bare "E": E1xx/E2xx/E501 conflict with ruff format.
+# E4 (imports) + E7 + E9 are the non-conflicting subset.
+#   W  - trailing whitespace, missing newline at EOF
+#   F  - pyflakes (unused imports, undefined names)
+#   I  - import sorting
+#   B  - flake8-bugbear (mutable defaults, except-clause bugs)
+#   C4 - flake8-comprehensions
+select = ["E4", "E7", "E9", "W", "F", "I", "B", "C4"]
+
+# "UP" (pyupgrade) is deliberately NOT selected. This codebase pins itself to
+# typing.List/Dict/Set/Tuple/Optional and avoids PEP 604 unions and PEP 695
+# generics on purpose (AGENTS.md "Hard constraints"). pyupgrade rewrites all of
+# those, and new UP rules land in every ruff minor release, so enabling the
+# category would mean auditing UP on every bump. If it is ever enabled, this
+# ignore list is mandatory:
+#   ignore = ["UP006", "UP007", "UP035", "UP037", "UP045", "UP046", "UP047"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# E402 (import not at top of file) is intentional and unavoidable: scripts/ is a
+# flat module dir, not a package, so the entrypoint and every test importing from
+# it must prepend scripts/ to sys.path *before* importing. See AGENTS.md.
+# Only these 5 files do it; the other 4 import normally.
+"scripts/site_scanning_alerts.py" = ["E402"]
+"tests/test_issues.py" = ["E402"]
+"tests/test_rules.py" = ["E402"]
+"tests/test_site_scanning_alerts.py" = ["E402"]
+"tests/test_snapshot.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+# Needed because scripts/ is a flat dir with bare imports; without this,
+# `from rules import ...` sorts into the third-party block.
+known-first-party = ["issues", "rules", "site_scanning_alerts", "snapshot"]

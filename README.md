@@ -276,6 +276,7 @@ This section is for GSA maintainers of the action itself (not consumers).
 - **Design:** Composite action (shell runner + Python scripts)
 - **Testing:** stdlib `unittest` + CI on every push/PR
 - **Docs enforcement:** `test_docs.py` validates input table ↔ `action.yml` parity
+- **Lint/format:** `ruff` (pinned in `pyproject.toml`); CI-only, never a runtime dependency
 
 ### Running Tests Locally
 
@@ -283,6 +284,21 @@ This section is for GSA maintainers of the action itself (not consumers).
 cd site-scanning-alert-template
 python3 -m unittest discover tests -v
 ```
+
+### Linting and Formatting
+
+`ruff` handles both lint and format. It is a development dependency only — the
+action itself runs on stdlib Python with no install step.
+
+```bash
+python3 -m pip install --group dev   # requires pip >= 25.1
+ruff check .                         # lint
+ruff format --check --diff .         # formatting gate (what CI runs)
+ruff check --fix . && ruff format .  # apply fixes
+```
+
+pyupgrade (`UP`) is deliberately not enabled: the code targets `typing.List`/
+`Optional` rather than builtin generics or PEP 604 unions.
 
 ### Running Manually (Dry Run Against Live Data)
 
@@ -301,22 +317,25 @@ cat /tmp/summary.md
 ### File Layout
 
 ```
-├── action.yml                # Composite action definition + input schema
-├── watchlist.txt            # Example watchlist (commented out by default)
+├── action.yml                        # Composite action definition + input schema
+├── pyproject.toml                    # Project metadata + ruff config (dependencies = [] on purpose)
+├── watchlist.txt                     # Example watchlist (commented out by default)
+├── AGENTS.md                         # Agent-facing constraints and gotchas
 ├── scripts/
-│   ├── site_scanning_alerts.py  # Entrypoint
-│   ├── snapshot.py          # CSV download + filtering + freshness checks
-│   ├── rules.py             # Change-diff + state-check + rendering
-│   └── issues.py            # Fingerprinted issue filing (file-or-skip, no rolling comments)
-├── tests/                   # stdlib unittest
+│   ├── site_scanning_alerts.py       # Entrypoint
+│   ├── snapshot.py                   # CSV download + filtering + freshness checks
+│   ├── rules.py                      # Change-diff + state-check + rendering
+│   └── issues.py                     # Fingerprinted issue filing (file-or-skip, no rolling comments)
+├── tests/                            # stdlib unittest (83 tests)
+│   ├── test_site_scanning_alerts.py  # End-to-end via INPUT_* env + SystemExit codes
 │   ├── test_snapshot.py
 │   ├── test_rules.py
 │   ├── test_issues.py
-│   ├── test_docs.py         # CI enforcement of docs accuracy
-│   └── fixtures/            # Tiny CSVs for tests
+│   ├── test_docs.py                  # CI enforcement of docs accuracy
+│   └── fixtures/                     # Tiny CSVs for tests (dated 2026-09-02)
 └── .github/workflows/
-    ├── site-scanning-alerts.yml  # Consumer recipe
-    └── test.yml             # CI (runs tests + docs checks)
+    ├── site-scanning-alerts.yml      # Consumer recipe
+    └── test.yml                      # CI (tests + docs checks + ruff lint)
 ```
 
 ### Releasing

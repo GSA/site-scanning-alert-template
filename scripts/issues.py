@@ -10,36 +10,37 @@ changed or new outage produces another. Triage and closing are manual.
 This trades issue-tab tidiness for a much simpler, harder-to-break
 lifecycle; revisit if the noise becomes a real problem.
 """
+
 import hashlib
 import json
-import urllib.request
 import urllib.error
 import urllib.parse
-from typing import List, Optional, Dict
+import urllib.request
+from typing import Dict, List, Optional
 
 # Cap on pages walked in find_open_issue - protects against runaway API
 # consumption in repos with a very large number of open issues.
 MAX_ISSUE_PAGES = 5
 
-MARKER_PREFIX = '<!-- site-scanning-alert:'
+MARKER_PREFIX = "<!-- site-scanning-alert:"
 
 
 def _find_issue_with_marker(issues: List[Dict], marker: str) -> Optional[Dict]:
     """Scan a list of issue objects for one containing the specified marker."""
     for issue in issues:
         # Skip pull requests (they appear in /issues but have a pull_request key)
-        if 'pull_request' in issue:
+        if "pull_request" in issue:
             continue
 
         # GitHub returns body: null for issues created without a
         # description, so `issue.get('body', '')` isn't enough -
         # the key is present with value None.
-        body = issue.get('body') or ''
+        body = issue.get("body") or ""
         if marker in body:
             return {
-                'number': issue['number'],
-                'html_url': issue['html_url'],
-                'body': body
+                "number": issue["number"],
+                "html_url": issue["html_url"],
+                "body": body,
             }
     return None
 
@@ -65,14 +66,14 @@ class IssueClient:
         self,
         method: str,
         path: str,
-        data: Optional[Dict] = None
+        data: Optional[Dict] = None,
     ) -> Dict:
         """Make authenticated GitHub API request."""
         url = f"{self.base_url}{path}"
         headers = {
-            'Authorization': f'Bearer {self.token}',
-            'Accept': 'application/vnd.github+json',
-            'Content-Type': 'application/json'
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
         }
 
         req_data = json.dumps(data).encode() if data else None
@@ -82,28 +83,34 @@ class IssueClient:
             with urllib.request.urlopen(req, timeout=30) as response:
                 return json.loads(response.read().decode())
         except urllib.error.HTTPError as e:
-            error_body = e.read().decode() if e.fp else ''
-            raise RuntimeError(f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}")
+            error_body = e.read().decode() if e.fp else ""
+            raise RuntimeError(
+                f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}"
+            ) from e
         except urllib.error.URLError as e:
-            raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}")
+            raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
 
-    def ensure_label(self, label: str, color: str = '0366d6', description: str = '') -> None:
+    def ensure_label(self, label: str, color: str = "0366d6", description: str = "") -> None:
         """Create label if it doesn't exist (idempotent)."""
         # Check existence via GET /labels/:name (404 = doesn't exist)
-        encoded = urllib.parse.quote(label, safe='')
+        encoded = urllib.parse.quote(label, safe="")
         try:
-            self._request('GET', f"/labels/{encoded}")
+            self._request("GET", f"/labels/{encoded}")
             return  # Already exists
         except RuntimeError as e:
-            if 'HTTP 404' not in str(e):
+            if "HTTP 404" not in str(e):
                 raise  # Unexpected error
 
         # Create it
-        self._request('POST', '/labels', {
-            'name': label,
-            'color': color,
-            'description': description or f'Site Scanning alert: {label}'
-        })
+        self._request(
+            "POST",
+            "/labels",
+            {
+                "name": label,
+                "color": color,
+                "description": description or f"Site Scanning alert: {label}",
+            },
+        )
 
     def find_open_issue(self, labels: List[str], marker: str) -> Optional[Dict]:
         """
@@ -121,10 +128,10 @@ class IssueClient:
         # GET /repos/:owner/:repo/issues?labels=label1,label2&state=open
         # Encode each label individually so the comma separator itself
         # stays a literal comma (GitHub reads it as label1 AND label2).
-        label_str = ','.join(urllib.parse.quote_plus(label) for label in labels)
+        label_str = ",".join(urllib.parse.quote_plus(label) for label in labels)
         for page in range(1, MAX_ISSUE_PAGES + 1):
             path = f"/issues?labels={label_str}&state=open&per_page=100&page={page}"
-            issues = self._request('GET', path)
+            issues = self._request("GET", path)
 
             if not issues:
                 return None
@@ -139,7 +146,7 @@ class IssueClient:
         print(
             f"WARNING: find_open_issue hit the {MAX_ISSUE_PAGES}-page cap "
             f"({MAX_ISSUE_PAGES * 100} issues) without finding a match; "
-            "treating as not found. Consider closing stale open issues."
+            "treating as not found. Consider closing stale open issues.",
         )
         return None
 
@@ -147,7 +154,7 @@ class IssueClient:
         self,
         title: str,
         body: str,
-        labels: List[str]
+        labels: List[str],
     ) -> Dict:
         """
         Create a new issue.
@@ -156,25 +163,22 @@ class IssueClient:
             Issue dict with keys: number, html_url
         """
         data = {
-            'title': title,
-            'body': body,
-            'labels': labels
+            "title": title,
+            "body": body,
+            "labels": labels,
         }
 
-        result = self._request('POST', '/issues', data)
+        result = self._request("POST", "/issues", data)
         return {
-            'number': result['number'],
-            'html_url': result['html_url']
+            "number": result["number"],
+            "html_url": result["html_url"],
         }
 
 
 def strip_markers(body: str) -> str:
     """Remove alert marker lines."""
-    lines = [
-        line for line in body.split('\n')
-        if not line.strip().startswith(MARKER_PREFIX)
-    ]
-    return '\n'.join(lines)
+    lines = [line for line in body.split("\n") if not line.strip().startswith(MARKER_PREFIX)]
+    return "\n".join(lines)
 
 
 def compute_fingerprint(body: str) -> str:
@@ -204,7 +208,7 @@ def file_alert(
     title: str,
     body: str,
     labels: List[str],
-    stream: str = 'alerts'
+    stream: str = "alerts",
 ) -> Dict[str, Optional[str]]:
     """
     File a new issue for the given findings, unless an open issue already
@@ -235,17 +239,17 @@ def file_alert(
         raise ValueError(
             "file_alert requires at least one label; an empty labels "
             "list means an existing issue can never be found, so every "
-            "run would create a new one."
+            "run would create a new one.",
         )
 
     marker = alert_marker(stream, compute_fingerprint(body))
     existing = client.find_open_issue(labels, marker)
 
     if existing:
-        return {'action': 'no-op', 'issue_url': existing['html_url']}
+        return {"action": "no-op", "issue_url": existing["html_url"]}
 
     for label in labels:
         client.ensure_label(label)
 
     result = client.create_issue(title, f"{marker}\n\n{body}", labels)
-    return {'action': 'created', 'issue_url': result['html_url']}
+    return {"action": "created", "issue_url": result["html_url"]}
