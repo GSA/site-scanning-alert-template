@@ -13,6 +13,10 @@ from typing import Dict, List, Optional, Set, Tuple
 import time
 
 
+# One parsed snapshot row: CSV column name -> value (never None; see _parse).
+Row = Dict[str, str]
+
+
 # Columns needed for alert evaluation
 REQUIRED_COLUMNS = [
     'initial_domain',
@@ -22,6 +26,11 @@ REQUIRED_COLUMNS = [
     'primary_scan_status',
     'scan_date'
 ]
+
+# Watchlist entry prefix selecting base-domain (rather than exact) matching,
+# and the two snapshot columns those two modes compare against.
+BASE_PREFIX = 'base:'
+MATCH_COLUMNS = ('initial_domain', 'initial_base_domain')
 
 
 class SnapshotError(Exception):
@@ -91,7 +100,7 @@ def _parse(
     url: str,
     wanted_columns: Optional[List[str]],
     optional_columns: Optional[List[str]]
-) -> List[Dict[str, str]]:
+) -> List[Row]:
     """
     Parse and project a downloaded snapshot's CSV bytes.
 
@@ -135,7 +144,7 @@ def download_snapshot(
     retry_count: int = 3,
     retry_delay: float = 2.0,
     optional_columns: Optional[List[str]] = None
-) -> List[Dict[str, str]]:
+) -> List[Row]:
     """
     Download and parse a Site Scanning CSV snapshot.
 
@@ -164,41 +173,31 @@ def download_snapshot(
     return _parse(raw, url, wanted_columns, optional_columns)
 
 
-def _parse_watchlist_entry(entry: str) -> Tuple[bool, str]:
+def _match_column(entry: str) -> Tuple[str, str]:
     """
-    Parse one watchlist entry into (is_base_match, value).
+    Parse one watchlist entry into (snapshot column, lowercased value).
 
-    "base:domain.gov" matches all sites under that base domain (is_base_match
-    is True, value is the base domain); anything else is an exact match on
-    initial_domain. The value is lowercased for case-insensitive comparison.
+    "base:domain.gov" matches all sites under that base domain, so it is
+    compared against `initial_base_domain`; anything else is an exact match
+    on `initial_domain`. The value is lowercased for case-insensitive
+    comparison.
+
+    This is the single definition of the watchlist matching rule - both
+    filter_to_watchlist and find_unmatched_entries go through it, so an
+    entry reported as unmatched is genuinely one that can never match.
     """
     entry = entry.strip()
-    if entry.startswith('base:'):
-        return True, entry[5:].lower()
-    return False, entry.lower()
+    if entry.startswith(BASE_PREFIX):
+        return 'initial_base_domain', entry[len(BASE_PREFIX):].lower()
+    return 'initial_domain', entry.lower()
 
 
-def _split_watchlist(watchlist: List[str]) -> Tuple[Set[str], Set[str]]:
-    """
-    Split raw watchlist entries into exact-match and base-match sets.
-
-    Returns:
-        Tuple of (exact_domains, base_domains), both lowercased.
-    """
-    exact_domains: Set[str] = set()
-    base_domains: Set[str] = set()
-
-    for entry in watchlist:
-        is_base, value = _parse_watchlist_entry(entry)
-        (base_domains if is_base else exact_domains).add(value)
-
-    return exact_domains, base_domains
+def _column_values(rows: List[Row], column: str) -> Set[str]:
+    """Collect the lowercased values of one column across rows."""
+    return {row.get(column, '').lower() for row in rows}
 
 
-def filter_to_watchlist(
-    rows: List[Dict[str, str]],
-    watchlist: List[str]
-) -> List[Dict[str, str]]:
+def filter_to_watchlist(rows: List[Row], watchlist: List[str]) -> List[Row]:
     """
     Filter snapshot rows to only those matching the watchlist.
 
@@ -210,37 +209,24 @@ def filter_to_watchlist(
     Returns:
         Filtered list of rows
     """
-    exact_domains, base_domains = _split_watchlist(watchlist)
+    wanted: Dict[str, Set[str]] = {}
+    for entry in watchlist:
+        column, value = _match_column(entry)
+        wanted.setdefault(column, set()).add(value)
 
     return [
         row for row in rows
-        if row.get('initial_domain', '').lower() in exact_domains
-        or row.get('initial_base_domain', '').lower() in base_domains
+        if any(row.get(column, '').lower() in values for column, values in wanted.items())
     ]
 
 
-def _is_watchlist_entry_present(
-    entry: str,
-    present_domains: Set[str],
-    present_bases: Set[str]
-) -> bool:
-    """Check if a single watchlist entry matches any domain or base domain."""
-    is_base, value = _parse_watchlist_entry(entry)
-    present = present_bases if is_base else present_domains
-    return value in present
-
-
-def find_unmatched_entries(
-    rows: List[Dict[str, str]],
-    watchlist: List[str]
-) -> List[str]:
+def find_unmatched_entries(rows: List[Row], watchlist: List[str]) -> List[str]:
     """
     Find watchlist entries that match nothing in the (unfiltered) snapshot.
 
-    Uses the same matching rules as filter_to_watchlist (base:/exact,
-    case-insensitive) so an entry reported here is genuinely never going to
-    trigger an alert - e.g. because of a typo or a domain that's been
-    dropped from the Site Scanning index.
+    An entry reported here is genuinely never going to trigger an alert -
+    e.g. because of a typo or a domain that's been dropped from the Site
+    Scanning index.
 
     Args:
         rows: Full snapshot rows (not pre-filtered to the watchlist)
@@ -249,13 +235,15 @@ def find_unmatched_entries(
     Returns:
         List of watchlist entries (original casing/prefix) with zero matches
     """
-    present_domains = {row.get('initial_domain', '').lower() for row in rows}
-    present_bases = {row.get('initial_base_domain', '').lower() for row in rows}
+    present = {column: _column_values(rows, column) for column in MATCH_COLUMNS}
 
-    return [
-        entry for entry in watchlist
-        if not _is_watchlist_entry_present(entry, present_domains, present_bases)
-    ]
+    unmatched = []
+    for entry in watchlist:
+        column, value = _match_column(entry)
+        if value not in present[column]:
+            unmatched.append(entry)
+
+    return unmatched
 
 
 def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
@@ -288,18 +276,20 @@ def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
         return None
 
 
-def _max_scan_date(rows: List[Dict[str, str]]) -> Optional[datetime]:
+def _max_scan_date(rows: List[Row]) -> Optional[datetime]:
     """Parse each row's scan_date and return the latest, or None if rows is
     empty or none of its scan_date values parse."""
-    dates = [parse_scan_date(row.get('scan_date', '')) for row in rows]
-    dates = [d for d in dates if d is not None]
+    dates = [
+        d for d in (parse_scan_date(row.get('scan_date', '')) for row in rows)
+        if d is not None
+    ]
     return max(dates) if dates else None
 
 
 def check_snapshot_freshness(
-    rows: List[Dict[str, str]],
+    rows: List[Row],
     max_age_days: int
-) -> tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str]]:
     """
     Check if snapshot is fresh enough to use.
 
@@ -321,8 +311,8 @@ def check_snapshot_freshness(
 
 
 def has_snapshot_rotated(
-    latest_rows: List[Dict[str, str]],
-    previous_rows: List[Dict[str, str]]
+    latest_rows: List[Row],
+    previous_rows: List[Row]
 ) -> bool:
     """
     Check if latest snapshot is newer than previous (i.e., rotation has occurred).
