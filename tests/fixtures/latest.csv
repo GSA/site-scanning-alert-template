@@ -1,0 +1,6 @@
+initial_domain,initial_base_domain,live,status_code,primary_scan_status,scan_date
+test1.gov,test1.gov,true,200,completed,2026-09-02T10:00:00Z
+test2.gov,test2.gov,false,403,completed,2026-09-02T10:00:00Z
+test3.gov,test3.gov,true,200,completed,2026-09-02T10:00:00Z
+sub.test4.gov,test4.gov,true,503,completed,2026-09-02T10:00:00Z
+another.test4.gov,test4.gov,true,200,timeout,2026-09-02T10:00:00Z

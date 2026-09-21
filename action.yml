@@ -1,0 +1,120 @@
+name: Site Scanning Alerts
+description: Monitor federal websites for status changes and configuration issues using GSA Site Scanning data
+author: GSA TTS
+branding:
+  icon: alert-triangle
+  color: blue
+
+inputs:
+  watchlist:
+    description: 'Path to the file containing domains to monitor (one per line, supports base:domain.gov syntax for all subdomains)'
+    required: false
+    default: 'watchlist.txt'
+  
+  mode:
+    description: 'Alert mode: change (detect changes between latest and previous snapshots), state (alert on bad current values), or both. change alone cannot confirm recovery from a sustained outage (no diff on day 2 of an outage looks identical to no diff on a healthy day) - use state or both for availability monitoring. Any other value is a hard configuration error.'
+    required: false
+    default: 'both'
+  
+  fields:
+    description: 'Comma-separated list of fields to monitor for changes (change mode only). Any column present in the Site Scanning snapshot is supported (e.g. live, status_code, primary_scan_status, https_enforced, hsts). Unrecognized field names are reported in the step summary and skipped.'
+    required: false
+    default: 'live,status_code,primary_scan_status'
+  
+  alert_on_status_codes:
+    description: 'Comma-separated list of HTTP status codes to alert on (state mode). Example: 500,502,503,504'
+    required: false
+    default: '500,502,503,504'
+  
+  alert_on_scan_status:
+    description: 'Comma-separated list of primary_scan_status values to alert on (state mode). Leave empty to disable. Example: connection_refused,invalid_ssl_cert'
+    required: false
+    default: ''
+  
+  alert_on_not_live:
+    description: 'Alert when monitored sites have live=false (state mode)'
+    required: false
+    default: 'false'
+  
+  ignore_blank_transitions:
+    description: 'Suppress alerts for value -> blank and blank -> value transitions. When false, renders blanks as "(no data)"'
+    required: false
+    default: 'false'
+  
+  ignore_transitions:
+    description: 'Comma-separated list of specific transitions to suppress, format: field:old_value->new_value. Example: primary_scan_status:timeout->execution_context_destroyed,primary_scan_status:execution_context_destroyed->timeout'
+    required: false
+    default: 'primary_scan_status:timeout->execution_context_destroyed,primary_scan_status:timeout->connection_reset,primary_scan_status:timeout->empty_response,primary_scan_status:execution_context_destroyed->timeout,primary_scan_status:connection_reset->timeout,primary_scan_status:empty_response->timeout,primary_scan_status:aborted->timeout,primary_scan_status:http2_error->timeout'
+  
+  max_changes:
+    description: 'Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines'
+    required: false
+    default: '25'
+  
+  labels:
+    description: 'Comma-separated list of labels to apply to created issues'
+    required: false
+    default: 'site-scanning-alert'
+  
+  issue_title:
+    description: 'Title for alert issues'
+    required: false
+    default: 'Possible website issues'
+  
+  snapshot_url:
+    description: 'URL of the latest Site Scanning snapshot CSV. Override for testing only'
+    required: false
+    default: 'https://api.gsa.gov/technology/site-scanning/data/site-scanning-latest.csv'
+  
+  previous_snapshot_url:
+    description: 'URL of the previous Site Scanning snapshot CSV (for change detection). Override for testing only'
+    required: false
+    default: 'https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv'
+  
+  max_snapshot_age_days:
+    description: 'Maximum age of the latest snapshot before reporting staleness instead of changes'
+    required: false
+    default: '3'
+  
+  token:
+    description: 'GitHub token for creating issues. Defaults to github.token (requires permissions.issues: write)'
+    required: false
+    default: ${{ github.token }}
+  
+  fail_on_alert:
+    description: 'Whether to fail the workflow when an alert is fired'
+    required: false
+    default: 'false'
+  
+  dry_run:
+    description: 'When true, render alert to step summary instead of creating an issue'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Run Site Scanning Alerts
+      shell: bash
+      run: |
+        python3 "${{ github.action_path }}/scripts/site_scanning_alerts.py"
+      env:
+        INPUT_WATCHLIST: ${{ inputs.watchlist }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_FIELDS: ${{ inputs.fields }}
+        INPUT_ALERT_ON_STATUS_CODES: ${{ inputs.alert_on_status_codes }}
+        INPUT_ALERT_ON_SCAN_STATUS: ${{ inputs.alert_on_scan_status }}
+        INPUT_ALERT_ON_NOT_LIVE: ${{ inputs.alert_on_not_live }}
+        INPUT_IGNORE_BLANK_TRANSITIONS: ${{ inputs.ignore_blank_transitions }}
+        INPUT_IGNORE_TRANSITIONS: ${{ inputs.ignore_transitions }}
+        INPUT_MAX_CHANGES: ${{ inputs.max_changes }}
+        INPUT_LABELS: ${{ inputs.labels }}
+        INPUT_ISSUE_TITLE: ${{ inputs.issue_title }}
+        INPUT_SNAPSHOT_URL: ${{ inputs.snapshot_url }}
+        INPUT_PREVIOUS_SNAPSHOT_URL: ${{ inputs.previous_snapshot_url }}
+        INPUT_MAX_SNAPSHOT_AGE_DAYS: ${{ inputs.max_snapshot_age_days }}
+        INPUT_TOKEN: ${{ inputs.token }}
+        INPUT_FAIL_ON_ALERT: ${{ inputs.fail_on_alert }}
+        INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}

@@ -1,0 +1,49 @@
+---
+name: Site Scanning Alerts
+
+on:
+  schedule:
+    # Run daily at 15:30 UTC (30 minutes after snapshot rotation at 15:00 UTC)
+    - cron: '30 15 * * *'
+  
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (render to step summary only, do not create issues)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  issues: write
+  contents: read
+
+# Serializes overlapping runs of this workflow (e.g. a scheduled run
+# landing while a manual workflow_dispatch run is still in flight).
+# find_open_issue + create_issue is a non-atomic find-then-create
+# sequence, so two concurrent runs can each observe no matching issue and
+# both create one. cancel-in-progress is false so the second run queues
+# rather than being killed mid-run.
+concurrency:
+  group: site-scanning-alerts-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  check-alerts:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      
+      - name: Run Site Scanning Alerts
+        uses: GSA/site-scanning-alert-template@v1
+        with:
+          watchlist: watchlist.txt
+          mode: both
+          fields: live,status_code,primary_scan_status
+          alert_on_status_codes: '500,502,503,504'
+          ignore_blank_transitions: 'false'
+          max_changes: '25'
+          labels: 'site-scanning-alert'
+          dry_run: ${{ inputs.dry_run || 'false' }}
