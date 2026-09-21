@@ -107,7 +107,7 @@ def download_snapshot(
             last_error = SnapshotError(f"Failed to fetch {url}: {e.reason}")
         except (csv.Error, UnicodeDecodeError) as e:
             last_error = SnapshotError(f"Failed to parse CSV from {url}: {e}")
-            raise  # Parse errors don't benefit from retry
+            raise last_error  # Parse errors don't benefit from retry
         except Exception as e:
             last_error = SnapshotError(f"Unexpected error loading {url}: {e}")
         
