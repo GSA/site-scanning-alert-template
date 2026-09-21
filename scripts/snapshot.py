@@ -8,8 +8,8 @@ to minimize memory use on large files (~45 MB, ~30k rows).
 import csv
 import urllib.request
 import urllib.error
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Set
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Set, Tuple
 import time
 
 
@@ -27,6 +27,91 @@ REQUIRED_COLUMNS = [
 class SnapshotError(Exception):
     """Raised when snapshot loading or validation fails."""
     pass
+
+
+def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
+    """
+    Download the raw bytes of a snapshot, retrying on transient network
+    failures only. Client errors (403/404/410) fail immediately.
+
+    Raises:
+        SnapshotError: If retry_count is exhausted (or zero) without a
+            successful fetch.
+    """
+    last_error = SnapshotError(f"Failed to fetch {url}: no attempts made (retry_count={retry_count})")
+
+    for attempt in range(retry_count):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'GSA-Site-Scanning-Alert-Action'})
+            with urllib.request.urlopen(req, timeout=180) as response:
+                return response.read()
+        except urllib.error.HTTPError as e:
+            last_error = SnapshotError(f"HTTP {e.code} from {url}: {e.reason}")
+            if e.code in (403, 404, 410):  # Client errors - don't retry
+                raise last_error
+        except urllib.error.URLError as e:
+            last_error = SnapshotError(f"Failed to fetch {url}: {e.reason}")
+
+        if attempt < retry_count - 1:
+            time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+
+    raise last_error
+
+
+def _parse(
+    raw: bytes,
+    url: str,
+    wanted_columns: Optional[List[str]],
+    optional_columns: Optional[List[str]]
+) -> List[Dict[str, str]]:
+    """
+    Parse and project a downloaded snapshot's CSV bytes.
+
+    Not retried by the caller - a malformed or incomplete CSV won't fix
+    itself on re-download, so failures here should surface immediately
+    with their real message instead of being retried and rewrapped.
+
+    Raises:
+        SnapshotError: If the CSV has no header, is missing a required
+            (wanted) column, or has zero data rows.
+    """
+    csv.field_size_limit(10 ** 7)  # Handle Site Scanning's 2000-char truncated fields
+
+    try:
+        reader = csv.DictReader(raw.decode('utf-8', errors='replace').splitlines())
+    except (csv.Error, UnicodeDecodeError) as e:
+        raise SnapshotError(f"Failed to parse CSV from {url}: {e}")
+
+    if reader.fieldnames is None:
+        raise SnapshotError(f"Snapshot at {url} has no header row")
+
+    # Determine which columns to keep
+    available = set(reader.fieldnames)
+    if wanted_columns:
+        missing = set(wanted_columns) - available
+        if missing:
+            raise SnapshotError(
+                f"Snapshot missing required columns: {', '.join(sorted(missing))}"
+            )
+        keep = set(wanted_columns)
+    else:
+        keep = set(reader.fieldnames)
+
+    if optional_columns:
+        keep |= (set(optional_columns) & available)
+
+    try:
+        rows = [
+            {k: (v or '') for k, v in row.items() if k in keep}
+            for row in reader
+        ]
+    except csv.Error as e:
+        raise SnapshotError(f"Failed to parse CSV from {url}: {e}")
+
+    if not rows:
+        raise SnapshotError(f"Snapshot at {url} contains zero rows")
+
+    return rows
 
 
 def download_snapshot(
@@ -55,66 +140,44 @@ def download_snapshot(
         optional_columns
 
     Raises:
-        SnapshotError: On download or parse failure after retries, or if a
-            required (wanted) column is missing
+        SnapshotError: On download failure after retries, or if the CSV is
+            malformed, missing a required (wanted) column, or has zero rows.
+            Parse/validation failures are not retried - retrying won't fix a
+            missing column.
     """
-    csv.field_size_limit(10 ** 7)  # Handle Site Scanning's 2000-char truncated fields
+    raw = _fetch(url, retry_count, retry_delay)
+    return _parse(raw, url, wanted_columns, optional_columns)
 
-    last_error = None
-    for attempt in range(retry_count):
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'GSA-Site-Scanning-Alert-Action'})
-            with urllib.request.urlopen(req, timeout=180) as response:
-                raw = response.read()
 
-            # Parse CSV with optional column projection
-            rows = []
-            reader = csv.DictReader(raw.decode('utf-8', errors='replace').splitlines())
+def _parse_watchlist_entry(entry: str) -> Tuple[bool, str]:
+    """
+    Parse one watchlist entry into (is_base_match, value).
 
-            if reader.fieldnames is None:
-                raise SnapshotError(f"Snapshot at {url} has no header row")
+    "base:domain.gov" matches all sites under that base domain (is_base_match
+    is True, value is the base domain); anything else is an exact match on
+    initial_domain. The value is lowercased for case-insensitive comparison.
+    """
+    entry = entry.strip()
+    if entry.startswith('base:'):
+        return True, entry[5:].lower()
+    return False, entry.lower()
 
-            # Determine which columns to keep
-            available = set(reader.fieldnames)
-            if wanted_columns:
-                missing = set(wanted_columns) - available
-                if missing:
-                    raise SnapshotError(
-                        f"Snapshot missing required columns: {', '.join(sorted(missing))}"
-                    )
-                keep = set(wanted_columns)
-            else:
-                keep = set(reader.fieldnames)
 
-            if optional_columns:
-                keep |= (set(optional_columns) & available)
+def _split_watchlist(watchlist: List[str]) -> Tuple[Set[str], Set[str]]:
+    """
+    Split raw watchlist entries into exact-match and base-match sets.
 
-            for row in reader:
-                # Project to wanted columns only
-                filtered = {k: (v or '') for k, v in row.items() if k in keep}
-                rows.append(filtered)
+    Returns:
+        Tuple of (exact_domains, base_domains), both lowercased.
+    """
+    exact_domains: Set[str] = set()
+    base_domains: Set[str] = set()
 
-            if not rows:
-                raise SnapshotError(f"Snapshot at {url} contains zero rows")
+    for entry in watchlist:
+        is_base, value = _parse_watchlist_entry(entry)
+        (base_domains if is_base else exact_domains).add(value)
 
-            return rows
-        
-        except urllib.error.HTTPError as e:
-            last_error = SnapshotError(f"HTTP {e.code} from {url}: {e.reason}")
-            if e.code in (403, 404, 410):  # Client errors - don't retry
-                raise last_error
-        except urllib.error.URLError as e:
-            last_error = SnapshotError(f"Failed to fetch {url}: {e.reason}")
-        except (csv.Error, UnicodeDecodeError) as e:
-            last_error = SnapshotError(f"Failed to parse CSV from {url}: {e}")
-            raise last_error  # Parse errors don't benefit from retry
-        except Exception as e:
-            last_error = SnapshotError(f"Unexpected error loading {url}: {e}")
-        
-        if attempt < retry_count - 1:
-            time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
-    
-    raise last_error
+    return exact_domains, base_domains
 
 
 def filter_to_watchlist(
@@ -123,34 +186,22 @@ def filter_to_watchlist(
 ) -> List[Dict[str, str]]:
     """
     Filter snapshot rows to only those matching the watchlist.
-    
+
     Args:
         rows: Snapshot rows (dicts with initial_domain and initial_base_domain keys)
         watchlist: List of entries; "base:domain.gov" matches all under that base,
                    otherwise exact match on initial_domain
-    
+
     Returns:
         Filtered list of rows
     """
-    exact_domains: Set[str] = set()
-    base_domains: Set[str] = set()
-    
-    for entry in watchlist:
-        entry = entry.strip()
-        if entry.startswith('base:'):
-            base_domains.add(entry[5:].lower())
-        else:
-            exact_domains.add(entry.lower())
-    
-    filtered = []
-    for row in rows:
-        domain = row.get('initial_domain', '').lower()
-        base = row.get('initial_base_domain', '').lower()
-        
-        if domain in exact_domains or base in base_domains:
-            filtered.append(row)
-    
-    return filtered
+    exact_domains, base_domains = _split_watchlist(watchlist)
+
+    return [
+        row for row in rows
+        if row.get('initial_domain', '').lower() in exact_domains
+        or row.get('initial_base_domain', '').lower() in base_domains
+    ]
 
 
 def find_unmatched_entries(
@@ -160,7 +211,7 @@ def find_unmatched_entries(
     """
     Find watchlist entries that match nothing in the (unfiltered) snapshot.
 
-    Mirrors filter_to_watchlist's matching rules exactly (base:/exact,
+    Uses the same matching rules as filter_to_watchlist (base:/exact,
     case-insensitive) so an entry reported here is genuinely never going to
     trigger an alert - e.g. because of a typo or a domain that's been
     dropped from the Site Scanning index.
@@ -177,13 +228,10 @@ def find_unmatched_entries(
 
     unmatched = []
     for entry in watchlist:
-        stripped = entry.strip()
-        if stripped.startswith('base:'):
-            if stripped[5:].lower() not in present_bases:
-                unmatched.append(entry)
-        else:
-            if stripped.lower() not in present_domains:
-                unmatched.append(entry)
+        is_base, value = _parse_watchlist_entry(entry)
+        present = present_bases if is_base else present_domains
+        if value not in present:
+            unmatched.append(entry)
 
     return unmatched
 
@@ -220,30 +268,36 @@ def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
         return None
 
 
+def _max_scan_date(rows: List[Dict[str, str]]) -> Optional[datetime]:
+    """Parse each row's scan_date and return the latest, or None if rows is
+    empty or none of its scan_date values parse."""
+    dates = [parse_scan_date(row.get('scan_date', '')) for row in rows]
+    dates = [d for d in dates if d is not None]
+    return max(dates) if dates else None
+
+
 def check_snapshot_freshness(
     rows: List[Dict[str, str]],
     max_age_days: int
-) -> tuple[bool, Optional[str], Optional[datetime]]:
+) -> tuple[bool, Optional[str]]:
     """
     Check if snapshot is fresh enough to use.
-    
+
     Args:
         rows: Snapshot rows with scan_date field
         max_age_days: Maximum allowed age in days
-    
+
     Returns:
-        Tuple of (is_fresh, max_date_str, max_date_obj)
+        Tuple of (is_fresh, max_date_str)
     """
-    dates = [parse_scan_date(row.get('scan_date', '')) for row in rows]
-    dates = [d for d in dates if d is not None]
-    
-    if not dates:
-        return False, None, None
-    
-    max_date = max(dates)
+    max_date = _max_scan_date(rows)
+
+    if max_date is None:
+        return False, None
+
     age = datetime.now(max_date.tzinfo) - max_date
-    
-    return age.days <= max_age_days, max_date.strftime('%Y-%m-%d'), max_date
+
+    return age.days <= max_age_days, max_date.strftime('%Y-%m-%d')
 
 
 def has_snapshot_rotated(
@@ -252,27 +306,21 @@ def has_snapshot_rotated(
 ) -> bool:
     """
     Check if latest snapshot is newer than previous (i.e., rotation has occurred).
-    
+
     Safe to call multiple times in a day - returns False if max scan_date is identical,
     making re-runs idempotent.
-    
+
     Args:
         latest_rows: Rows from site-scanning-latest.csv
         previous_rows: Rows from site-scanning-previous.csv
-    
+
     Returns:
         True if latest is newer than previous, False otherwise
     """
-    latest_dates = [parse_scan_date(r.get('scan_date', '')) for r in latest_rows]
-    previous_dates = [parse_scan_date(r.get('scan_date', '')) for r in previous_rows]
-    
-    latest_dates = [d for d in latest_dates if d is not None]
-    previous_dates = [d for d in previous_dates if d is not None]
-    
-    if not latest_dates or not previous_dates:
+    max_latest = _max_scan_date(latest_rows)
+    max_previous = _max_scan_date(previous_rows)
+
+    if max_latest is None or max_previous is None:
         return True  # Can't determine, proceed
-    
-    max_latest = max(latest_dates)
-    max_previous = max(previous_dates)
-    
+
     return max_latest > max_previous

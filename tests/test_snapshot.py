@@ -127,6 +127,37 @@ class TestDownloadSnapshotColumnProjection(unittest.TestCase):
             with self.assertRaises(SnapshotError):
                 download_snapshot('http://example.test/latest.csv', REQUIRED_COLUMNS, retry_count=1)
 
+    def test_missing_required_column_raises_with_real_message_and_no_retry(self):
+        """
+        Regression: a missing column is a validation failure, not a
+        transient network error - it must surface its own message (not get
+        rewrapped as "Unexpected error") and must not be retried, since
+        retrying won't add the missing column.
+        """
+        csv_bytes = _csv_bytes(['initial_domain'], [['test.gov']])
+        urlopen_calls = []
+
+        def fake_urlopen(*args, **kwargs):
+            urlopen_calls.append(1)
+            return FakeHttpResponse(csv_bytes)
+
+        with patch('snapshot.urllib.request.urlopen', side_effect=fake_urlopen), \
+             patch('snapshot.time.sleep') as mock_sleep:
+            with self.assertRaises(SnapshotError) as cm:
+                download_snapshot('http://example.test/latest.csv', REQUIRED_COLUMNS, retry_count=3)
+
+        self.assertIn('Snapshot missing required columns', str(cm.exception))
+        self.assertEqual(len(urlopen_calls), 1)
+        mock_sleep.assert_not_called()
+
+    def test_zero_retry_count_raises_snapshot_error_not_type_error(self):
+        """Regression: retry_count=0 must still raise SnapshotError, not
+        TypeError from `raise None`."""
+        with patch('snapshot.urllib.request.urlopen') as mock_urlopen:
+            with self.assertRaises(SnapshotError):
+                download_snapshot('http://example.test/latest.csv', REQUIRED_COLUMNS, retry_count=0)
+        mock_urlopen.assert_not_called()
+
 
 class TestFindUnmatchedEntries(unittest.TestCase):
     """Regression coverage for finding #6: typo'd/missing watchlist entries must be reported."""
@@ -189,7 +220,7 @@ class TestSnapshotFreshness(unittest.TestCase):
             {'scan_date': today},
         ]
         
-        is_fresh, date_str, date_obj = check_snapshot_freshness(rows, max_age_days=3)
+        is_fresh, date_str = check_snapshot_freshness(rows, max_age_days=3)
         
         self.assertTrue(is_fresh)
         self.assertIsNotNone(date_str)
@@ -200,7 +231,7 @@ class TestSnapshotFreshness(unittest.TestCase):
             {'scan_date': old_date},
         ]
         
-        is_fresh, date_str, date_obj = check_snapshot_freshness(rows, max_age_days=3)
+        is_fresh, date_str = check_snapshot_freshness(rows, max_age_days=3)
         
         self.assertFalse(is_fresh)
 

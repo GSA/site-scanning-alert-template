@@ -5,41 +5,31 @@ Alert rule evaluation for Site Scanning data.
 Implements change-detection (latest vs previous) and state-check (bad current values)
 with configurable noise suppression.
 """
+from dataclasses import dataclass
 from typing import Dict, List, Set, Tuple
-from collections import defaultdict, Counter
+from collections import Counter
 
 
+@dataclass
 class Alert:
     """Represents a single alert finding."""
-    
-    def __init__(
-        self,
-        domain: str,
-        field: str,
-        old_value: str,
-        new_value: str,
-        alert_type: str = 'change'
-    ):
-        self.domain = domain
-        self.field = field
-        self.old_value = old_value
-        self.new_value = new_value
-        self.alert_type = alert_type  # 'change', 'state', 'corpus'
-    
+
+    domain: str
+    field: str
+    old_value: str
+    new_value: str
+    alert_type: str = 'change'  # 'change', 'state', 'corpus'
+
     def to_line(self) -> str:
         """Format as issue body line."""
-        if self.alert_type == 'change':
-            old = '(no data)' if self.old_value == '' else self.old_value
-            new = '(no data)' if self.new_value == '' else self.new_value
-            return f"initial_domain: {self.domain}\n{self.field}: {old} -> {new}"
-        elif self.alert_type == 'state':
+        if self.alert_type == 'state':
             return f"initial_domain: {self.domain}\n{self.field}: {self.new_value}"
         elif self.alert_type == 'corpus':
             return f"initial_domain: {self.domain}\n{self.new_value}"  # message in new_value
-        return f"initial_domain: {self.domain}\n{self.field}: {self.old_value} -> {self.new_value}"
-    
-    def __repr__(self):
-        return f"Alert({self.domain}, {self.field}, {self.old_value!r}, {self.new_value!r}, {self.alert_type})"
+        else:  # 'change'
+            old = '(no data)' if self.old_value == '' else self.old_value
+            new = '(no data)' if self.new_value == '' else self.new_value
+            return f"initial_domain: {self.domain}\n{self.field}: {old} -> {new}"
 
 
 def evaluate_change_diff(
@@ -189,14 +179,6 @@ def dedupe_alerts(alerts: List[Alert]) -> List[Alert]:
     return deduped
 
 
-def group_alerts_by_domain(alerts: List[Alert]) -> Dict[str, List[Alert]]:
-    """Group alerts by initial_domain for rendering."""
-    grouped = defaultdict(list)
-    for alert in alerts:
-        grouped[alert.domain].append(alert)
-    return dict(grouped)
-
-
 def summarize_alerts(alerts: List[Alert]) -> str:
     """
     Produce a summary when max_changes is exceeded.
@@ -226,44 +208,29 @@ def summarize_alerts(alerts: List[Alert]) -> str:
     return '\n'.join(lines)
 
 
-def render_alerts(
-    alerts: List[Alert],
-    max_changes: int,
-    issue_title: str = "Possible website issues"
-) -> str:
+def render_alerts(alerts: List[Alert], max_changes: int) -> str:
     """
     Render alerts as issue body text.
-    
+
     Args:
         alerts: List of Alert objects to render
         max_changes: Maximum number to enumerate; beyond this, show summary
-        issue_title: Title for the issue (not included in body, but used for context)
-    
+
     Returns:
         Markdown-formatted issue body
     """
     if not alerts:
         return "Site Scanning results have returned to normal. All monitored websites are operating as expected."
-    
+
+    header = "❗ Site Scanning results have changed for websites that you are monitoring:\n\n"
+
     if len(alerts) > max_changes:
-        body = "❗ Site Scanning results have changed for websites that you are monitoring:\n\n"
-        body += summarize_alerts(alerts)
-        body += "\n\nPlease investigate as appropriate."
-        return body
-    
-    # Enumerate all
-    grouped = group_alerts_by_domain(alerts)
-    
-    body = "❗ Site Scanning results have changed for websites that you are monitoring:\n\n"
-    
-    for domain in sorted(grouped.keys()):
-        domain_alerts = grouped[domain]
-        for alert in domain_alerts:
-            body += alert.to_line() + "\n\n"
-    
-    body += "Please investigate as appropriate."
-    
-    return body
+        return header + summarize_alerts(alerts) + "\n\nPlease investigate as appropriate."
+
+    # Enumerate all, grouped by domain. sorted() is stable, so alerts for
+    # the same domain keep their original relative order.
+    lines = [alert.to_line() for alert in sorted(alerts, key=lambda a: a.domain)]
+    return header + "\n\n".join(lines) + "\n\nPlease investigate as appropriate."
 
 
 def parse_ignore_transitions(ignore_str: str) -> Set[Tuple[str, str, str]]:
