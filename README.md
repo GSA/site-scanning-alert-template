@@ -272,7 +272,7 @@ This section is for GSA maintainers of the action itself (not consumers).
 
 ### Architecture
 
-- **Language:** Python 3.9+, stdlib only (no pip dependencies)
+- **Language:** Python 3.14+, stdlib only (no pip dependencies)
 - **Design:** Composite action (shell runner + Python scripts)
 - **Testing:** stdlib `unittest` + CI on every push/PR
 - **Docs enforcement:** `test_docs.py` validates input table ↔ `action.yml` parity
