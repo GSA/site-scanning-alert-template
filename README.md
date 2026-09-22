@@ -54,20 +54,24 @@ This repo monitors the sites listed in `watchlist.txt` and checks for changes or
 
 When a monitored site has a problem, an issue like this is created automatically:
 
-```
+```markdown
 ❗ Site Scanning results have changed for websites that you are monitoring:
 
-initial_domain: blog.acme.gov
-live: TRUE -> FALSE
-
-initial_domain: blog.acme.gov
-status_code: 200 -> 503
-
-initial_domain: calendar.acme.gov
-primary_scan_status: completed -> timeout
+- **blog.acme.gov**
+  - `live`: TRUE → FALSE
+  - `status_code`: 200 → 503
+- **calendar.acme.gov**
+  - `primary_scan_status`: completed → timeout
+- **docs.acme.gov**
+  - Newly in snapshot
 
 Please investigate as appropriate.
 ```
+
+Findings are grouped by site, so a site with several problems reads as one entry
+rather than several unrelated ones. The grouping is a nested list rather than
+per-site headings: an issue body starts below the issue title, so headings added
+here would land at the wrong level in the page's heading outline.
 
 The action uses **fingerprinted filing** (no rolling comments, no auto-close - MVP tradeoff, see [Known Limitations](#known-limitations)):
 - **First detection** → files a new issue
