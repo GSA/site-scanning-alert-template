@@ -105,7 +105,7 @@ class TestStalledRotationStillRunsStateChecks(SiteScanningAlertsTestCase):
 
         calls = []
 
-        def fake_file_alert(client, title, body, labels, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts', footer=''):
             calls.append(stream)
             return {'action': 'no-op', 'issue_url': None}
 
@@ -144,7 +144,7 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
         def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
             return stale_rows
 
-        def fake_file_alert(client, title, body, labels, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts', footer=''):
             return {'action': 'created', 'issue_url': 'https://x/1'}
 
         env = dict(BASE_ENV)
@@ -176,7 +176,7 @@ class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
         def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
             return stale_rows
 
-        def fake_file_alert(client, title, body, labels, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts', footer=''):
             return {'action': 'no-op', 'issue_url': 'https://x/1'}
 
         env = dict(BASE_ENV)
@@ -318,7 +318,7 @@ class TestEmptyLabelsFallback(SiteScanningAlertsTestCase):
 
         captured = {}
 
-        def fake_file_alert(client, title, body, labels, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts', footer=''):
             captured[stream] = labels
             return {'action': 'created', 'issue_url': 'https://x/1'}
 
@@ -399,7 +399,7 @@ class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
 
         calls = []
 
-        def fake_file_alert(client, title, body, labels, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts', footer=''):
             calls.append(stream)
             return {'action': 'no-op', 'issue_url': None}
 
@@ -434,7 +434,7 @@ class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
 
         calls = []
 
-        def fake_file_alert(client, title, body, labels, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts', footer=''):
             calls.append(stream)
             return {'action': 'no-op', 'issue_url': None}
 
@@ -466,9 +466,11 @@ class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
             return LATEST_ROWS
 
         calls = []
+        footers = []
 
-        def fake_file_alert(client, title, body, labels, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts', footer=''):
             calls.append(stream)
+            footers.append(footer)
             return {'action': 'created', 'issue_url': 'https://x/1'}
 
         env = dict(BASE_ENV)
@@ -489,6 +491,31 @@ class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
 
         self.assertEqual(cm.exception.code, 0)
         self.assertIn('alerts', calls)
+        # The footer (passed separately from body, so it never affects the
+        # fingerprint) carries the latest snapshot's scan date.
+        self.assertIn('2026-09-02', footers[0])
+
+    def test_dry_run_step_summary_includes_snapshot_date_footer(self):
+        self._write_watchlist(['sub.test4.gov'])  # status_code 200 -> 503
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            if 'previous' in url:
+                return PREVIOUS_ROWS
+            return LATEST_ROWS
+
+        env = dict(BASE_ENV)
+        env['INPUT_MODE'] = 'change'
+        env['INPUT_WATCHLIST'] = self.watchlist_file.name
+        env['GITHUB_STEP_SUMMARY'] = self.summary_file.name
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(ssa, 'download_snapshot', side_effect=fake_download):
+            with self.assertRaises(SystemExit) as cm:
+                ssa.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        summary = self._read_summary()
+        self.assertIn('2026-09-02', summary)
 
     def test_fail_on_alert_fails_when_existing_alert_is_noop(self):
         self._write_watchlist(['sub.test4.gov'])  # status_code 200 -> 503
@@ -498,7 +525,7 @@ class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
                 return PREVIOUS_ROWS
             return LATEST_ROWS
 
-        def fake_file_alert(client, title, body, labels, stream='alerts'):
+        def fake_file_alert(client, title, body, labels, stream='alerts', footer=''):
             return {'action': 'no-op', 'issue_url': 'https://x/1'}
 
         env = dict(BASE_ENV)

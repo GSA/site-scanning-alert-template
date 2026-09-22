@@ -213,6 +213,36 @@ class TestFileAlert(unittest.TestCase):
         # ensure_label should not run again once the issue already exists.
         self.assertEqual(client.ensure_label_calls, [])
 
+    def test_footer_does_not_affect_fingerprint(self):
+        """
+        The footer (e.g. snapshot date) changes on every run even when
+        the findings are unchanged, so it must be excluded from the
+        fingerprint - otherwise every run would file a new issue.
+        """
+        client = MarkerFilteringFakeClient()
+
+        first = file_alert(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert'], footer='Snapshot date: 2026-09-20'
+        )
+        second = file_alert(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert'], footer='Snapshot date: 2026-09-21'
+        )
+
+        self.assertEqual(second['action'], 'no-op')
+        self.assertEqual(len(client.issues), 1)
+
+    def test_footer_included_in_created_body(self):
+        client = MarkerFilteringFakeClient()
+
+        file_alert(
+            client, 'Possible website issues', 'something is wrong',
+            ['site-scanning-alert'], footer='Snapshot date: 2026-09-21'
+        )
+
+        self.assertIn('Snapshot date: 2026-09-21', client.issues[0]['body'])
+
     def test_files_new_issue_when_findings_change(self):
         """
         A changed set of findings (e.g. a new domain fails) has a

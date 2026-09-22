@@ -55,18 +55,19 @@ This repo monitors the sites listed in `watchlist.txt` and checks for changes or
 When a monitored site has a problem, an issue like this is created automatically:
 
 ```
-❗ Site Scanning results have changed for websites that you are monitoring:
+❗ **Site Scanning flagged 2 of your monitored website(s)** (3 findings):
 
-initial_domain: blog.acme.gov
-live: TRUE -> FALSE
+**blog.acme.gov**
+- `live`: true -> false
+- `status_code`: 200 -> 503
 
-initial_domain: blog.acme.gov
-status_code: 200 -> 503
-
-initial_domain: calendar.acme.gov
-primary_scan_status: completed -> timeout
+**calendar.acme.gov**
+- `primary_scan_status`: completed -> timeout
 
 Please investigate as appropriate.
+
+---
+Snapshot date: 2026-09-21 · [Scan statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) · [Data dictionary](https://github.com/GSA/site-scanning-documentation/blob/main/data/Site_Scanning_Data_Dictionary.csv)
 ```
 
 The action uses **fingerprinted filing** (no rolling comments, no auto-close - MVP tradeoff, see [Known Limitations](#known-limitations)):
@@ -149,13 +150,13 @@ When you receive an alert, here's what each field means and what action to take:
 
 | Field | Meaning | What It Usually Means | Reference |
 |-------|---------|----------------------|-----------|
-| `live: TRUE -> FALSE` | Site stopped returning a 2xx status code | Real outage or a new block on the scanner. Investigate immediately. | [Data Dictionary](https://github.com/GSA/site-scanning-documentation/blob/main/data/Site_Scanning_Data_Dictionary.csv) |
-| `live: TRUE -> (no data)` | Scan couldn't complete at all | Check `primary_scan_status` on the same line for the reason (often `timeout` or `dns_resolution_error`) | |
-| `status_code: 200 -> 403` | Now refusing the scanner | Often WAF/bot rules, not a real outage. 3,144 sites sit at 403 steady-state. Verify manually in a browser. | |
-| `status_code: 200 -> 503` | Service unavailable | Real problem. Investigate with your hosting team. | |
-| `primary_scan_status: completed -> timeout` | Loaded before, didn't finish now | Most common genuine signal (142 of 410 changes/day). Often indicates slow page load or redirect loop. | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
-| `primary_scan_status: completed -> dns_resolution_error` | DNS stopped resolving | Domain expired, DNS misconfiguration, or site taken offline | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
-| `primary_scan_status: completed -> invalid_ssl_cert` | Certificate problem | Check expiration and CN/SAN match | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
+| `` `live`: true -> false `` | Site stopped returning a 2xx status code | Real outage or a new block on the scanner. Investigate immediately. | [Data Dictionary](https://github.com/GSA/site-scanning-documentation/blob/main/data/Site_Scanning_Data_Dictionary.csv) |
+| `` `live`: true -> (no data) `` | Scan couldn't complete at all | Check `primary_scan_status` on the same line for the reason (often `timeout` or `dns_resolution_error`) | |
+| `` `status_code`: 200 -> 403 `` | Now refusing the scanner | Often WAF/bot rules, not a real outage. 3,144 sites sit at 403 steady-state. Verify manually in a browser. | |
+| `` `status_code`: 200 -> 503 `` | Service unavailable | Real problem. Investigate with your hosting team. | |
+| `` `primary_scan_status`: completed -> timeout `` | Loaded before, didn't finish now | Most common genuine signal (142 of 410 changes/day). Often indicates slow page load or redirect loop. | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
+| `` `primary_scan_status`: completed -> dns_resolution_error `` | DNS stopped resolving | Domain expired, DNS misconfiguration, or site taken offline | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
+| `` `primary_scan_status`: completed -> invalid_ssl_cert `` | Certificate problem | Check expiration and CN/SAN match | [Scan Statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) |
 | `no longer in snapshot` | Dropped from the Federal Website Index | Not an outage — index maintenance. Site may have been marked non-public or moved to a non-federal domain | |
 | `newly in snapshot` | Added to the Federal Website Index | Not a problem — the watchlist is expanding | |
 

@@ -30,16 +30,19 @@ class Alert:
     new_value: str
     alert_type: str = 'change'  # 'change', 'state', 'corpus'
 
-    def to_line(self) -> str:
-        """Format as issue body line."""
+    def to_bullet(self) -> str:
+        """
+        Format as a single bullet line, without the domain (the caller
+        groups bullets under a per-domain heading - see _group_by_domain).
+        """
         if self.alert_type == 'state':
-            return f"initial_domain: {self.domain}\n{self.field}: {self.new_value}"
+            return f"- `{self.field}`: {self.new_value} (current value)"
         if self.alert_type == 'corpus':
-            return f"initial_domain: {self.domain}\n{self.new_value}"  # message in new_value
+            return f"- {self.new_value}"  # message in new_value
 
         old = self.old_value or '(no data)'
         new = self.new_value or '(no data)'
-        return f"initial_domain: {self.domain}\n{self.field}: {old} -> {new}"
+        return f"- `{self.field}`: {old} -> {new}"
 
     def dedupe_key(self) -> Tuple[str, str]:
         """
@@ -235,6 +238,19 @@ def summarize_alerts(alerts: List[Alert]) -> str:
     return '\n'.join(lines)
 
 
+def _group_by_domain(alerts: List[Alert]) -> List[Tuple[str, List[Alert]]]:
+    """
+    Group alerts under their domain, domains sorted alphabetically.
+
+    sorted() is stable, so alerts for the same domain keep their original
+    relative order within that domain's group.
+    """
+    grouped: Dict[str, List[Alert]] = {}
+    for alert in sorted(alerts, key=lambda a: a.domain):
+        grouped.setdefault(alert.domain, []).append(alert)
+    return list(grouped.items())
+
+
 def render_alerts(alerts: List[Alert], max_changes: int) -> str:
     """
     Render alerts as issue body text.
@@ -251,16 +267,38 @@ def render_alerts(alerts: List[Alert], max_changes: int) -> str:
 
     if len(alerts) > max_changes:
         detail = summarize_alerts(alerts)
-    else:
-        # Enumerate all, grouped by domain. sorted() is stable, so alerts for
-        # the same domain keep their original relative order.
-        detail = "\n\n".join(
-            alert.to_line() for alert in sorted(alerts, key=lambda a: a.domain)
-        )
+        return f"❗ {detail}\n\nPlease investigate as appropriate."
 
+    groups = _group_by_domain(alerts)
+    detail = "\n\n".join(
+        f"**{domain}**\n" + "\n".join(a.to_bullet() for a in domain_alerts)
+        for domain, domain_alerts in groups
+    )
+    finding_word = 'finding' if len(alerts) == 1 else 'findings'
+    header = (
+        f"❗ **Site Scanning flagged {len(groups)} of your monitored website(s)** "
+        f"({len(alerts)} {finding_word}):"
+    )
+
+    return f"{header}\n\n{detail}\n\nPlease investigate as appropriate."
+
+
+def render_footer(snapshot_date: Optional[str]) -> str:
+    """
+    Render the issue body footer: a divider, the snapshot date (if known),
+    and links to GSA's remediation references.
+
+    Deliberately kept out of render_alerts' return value - the caller must
+    exclude this from fingerprinting (see issues.file_alert's `footer`
+    param), since the snapshot date changes daily and would otherwise
+    force a new issue on every run.
+    """
+    date_clause = f"Snapshot date: {snapshot_date} · " if snapshot_date else ""
     return (
-        "❗ Site Scanning results have changed for websites that you are monitoring:\n\n"
-        f"{detail}\n\nPlease investigate as appropriate."
+        "---\n"
+        f"{date_clause}"
+        "[Scan statuses](https://github.com/GSA/site-scanning-documentation/blob/main/pages/scan_statuses.md) · "
+        "[Data dictionary](https://github.com/GSA/site-scanning-documentation/blob/main/data/Site_Scanning_Data_Dictionary.csv)"
     )
 
 

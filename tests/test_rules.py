@@ -12,22 +12,34 @@ from rules import (
     evaluate_state_check,
     dedupe_alerts,
     parse_ignore_transitions,
-    render_alerts
+    render_alerts,
+    render_footer
 )
 
 
 class TestAlertRendering(unittest.TestCase):
-    
-    def test_alert_to_line_change(self):
+
+    def test_alert_to_bullet_change(self):
         alert = Alert('test.gov', 'live', 'true', 'false', 'change')
-        line = alert.to_line()
-        self.assertIn('test.gov', line)
-        self.assertIn('live: true -> false', line)
-    
+        bullet = alert.to_bullet()
+        self.assertNotIn('test.gov', bullet)  # domain is the caller's heading, not the bullet
+        self.assertIn('`live`: true -> false', bullet)
+
     def test_alert_blank_rendering(self):
         alert = Alert('test.gov', 'status_code', '200', '', 'change')
-        line = alert.to_line()
-        self.assertIn('(no data)', line)
+        bullet = alert.to_bullet()
+        self.assertIn('(no data)', bullet)
+
+    def test_alert_to_bullet_state(self):
+        alert = Alert('test.gov', 'status_code', '', '503', 'state')
+        bullet = alert.to_bullet()
+        self.assertIn('`status_code`: 503', bullet)
+        self.assertIn('current value', bullet)
+
+    def test_alert_to_bullet_corpus(self):
+        alert = Alert('test.gov', '', '', 'newly in snapshot', 'corpus')
+        bullet = alert.to_bullet()
+        self.assertIn('newly in snapshot', bullet)
 
 
 class TestChangeDiff(unittest.TestCase):
@@ -203,33 +215,70 @@ class TestParseIgnoreTransitions(unittest.TestCase):
 
 
 class TestRenderAlerts(unittest.TestCase):
-    
+
     def test_render_below_max(self):
         alerts = [
             Alert('test1.gov', 'live', 'true', 'false', 'change'),
             Alert('test2.gov', 'status_code', '200', '503', 'change'),
         ]
-        
+
         body = render_alerts(alerts, max_changes=10)
-        
+
         self.assertIn('test1.gov', body)
         self.assertIn('test2.gov', body)
-        self.assertIn('live: true -> false', body)
-    
+        self.assertIn('`live`: true -> false', body)
+        self.assertIn('2 of your monitored website(s)', body)
+        self.assertIn('2 findings', body)
+
+    def test_render_groups_multiple_findings_under_one_domain_heading(self):
+        alerts = [
+            Alert('test.gov', 'live', 'true', 'false', 'change'),
+            Alert('test.gov', 'status_code', '200', '503', 'change'),
+        ]
+
+        body = render_alerts(alerts, max_changes=10)
+
+        # Domain heading appears exactly once even though it has 2 findings.
+        self.assertEqual(body.count('**test.gov**'), 1)
+        self.assertIn('1 of your monitored website(s)', body)
+        self.assertIn('2 findings', body)
+
+    def test_render_singular_finding(self):
+        alerts = [Alert('test.gov', 'live', 'true', 'false', 'change')]
+
+        body = render_alerts(alerts, max_changes=10)
+
+        self.assertIn('1 finding', body)
+        self.assertNotIn('1 findings', body)
+
     def test_render_exceeds_max(self):
         alerts = [Alert(f'test{i}.gov', 'live', 'true', 'false', 'change') for i in range(30)]
-        
+
         body = render_alerts(alerts, max_changes=25)
-        
+
         self.assertIn('30 total changes', body)
         self.assertIn('exceeds max_changes', body)
-    
+
     def test_render_cleared(self):
         alerts = []
-        
+
         body = render_alerts(alerts, max_changes=25)
-        
+
         self.assertIn('returned to normal', body)
+
+
+class TestRenderFooter(unittest.TestCase):
+
+    def test_includes_snapshot_date_when_known(self):
+        footer = render_footer('2026-09-21')
+        self.assertIn('2026-09-21', footer)
+        self.assertIn('Scan statuses', footer)
+        self.assertIn('Data dictionary', footer)
+
+    def test_omits_date_clause_when_unknown(self):
+        footer = render_footer(None)
+        self.assertNotIn('Snapshot date', footer)
+        self.assertIn('Scan statuses', footer)
 
 
 if __name__ == '__main__':

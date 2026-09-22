@@ -204,7 +204,8 @@ def file_alert(
     title: str,
     body: str,
     labels: List[str],
-    stream: str = 'alerts'
+    stream: str = 'alerts',
+    footer: str = ''
 ) -> Dict[str, Optional[str]]:
     """
     File a new issue for the given findings, unless an open issue already
@@ -213,11 +214,17 @@ def file_alert(
     Args:
         client: IssueClient instance
         title: Issue title
-        body: Alert body (without marker)
+        body: Alert body (without marker). Fingerprinted for dedupe.
         labels: List of label names to apply
         stream: Distinguishes alert kinds that share the same labels (e.g.
             'alerts' vs 'staleness'), so find_open_issue only matches an
             issue filed by this same stream.
+        footer: Optional trailing text appended to the created issue body
+            (e.g. snapshot date, doc links). Deliberately excluded from
+            the fingerprint - it's expected to change from run to run
+            (the snapshot date, for one) even when the findings
+            themselves are identical, and including it would defeat
+            dedupe by forcing a new issue every time.
 
     Returns:
         Dict with keys:
@@ -247,5 +254,9 @@ def file_alert(
     for label in labels:
         client.ensure_label(label)
 
-    result = client.create_issue(title, f"{marker}\n\n{body}", labels)
+    full_body = f"{marker}\n\n{body}"
+    if footer:
+        full_body += f"\n\n{footer}"
+
+    result = client.create_issue(title, full_body, labels)
     return {'action': 'created', 'issue_url': result['html_url']}

@@ -28,6 +28,7 @@ from rules import (
     evaluate_state_check,
     dedupe_alerts,
     render_alerts,
+    render_footer,
     parse_ignore_transitions,
     Alert
 )
@@ -188,12 +189,19 @@ def _check_freshness_or_exit(
     latest_rows: List[Row],
     labels: List[str],
     client: Optional[IssueClient]
-) -> None:
-    """Validate snapshot freshness and exit if stale (filing staleness issue if configured)."""
+) -> Optional[str]:
+    """
+    Validate snapshot freshness and exit if stale (filing staleness issue
+    if configured).
+
+    Returns:
+        The latest snapshot's scan date (YYYY-MM-DD), for inclusion in the
+        alert footer, or None if it couldn't be determined.
+    """
     is_fresh, max_date_str = check_snapshot_freshness(latest_rows, config.max_snapshot_age_days)
     if is_fresh:
         print(f"Snapshot freshness OK (dated {max_date_str})")
-        return
+        return max_date_str
 
     msg = (
         f"⚠️ **Snapshot is stale**\n\nLatest snapshot is dated {max_date_str or 'unknown'}, "
@@ -295,21 +303,23 @@ def _publish_alerts(
     config: Config,
     client: Optional[IssueClient],
     body: str,
+    footer: str,
     labels: List[str],
     alert_count: int
 ) -> NoReturn:
     """Output alert preview in dry run, or file a GitHub issue. Always exits."""
     if config.dry_run:
+        full_body = f"{body}\n\n{footer}" if footer else body
         print("\n" + "=" * 60)
         print("DRY RUN - Issue body preview:")
         print("=" * 60)
-        print(body)
+        print(full_body)
         print("=" * 60)
-        write_step_summary(f"## Dry Run\n\n{body}")
+        write_step_summary(f"## Dry Run\n\n{full_body}")
         print("\nCompleted successfully")
         sys.exit(0)
 
-    result = file_alert(client, config.issue_title, body, labels, stream='alerts')
+    result = file_alert(client, config.issue_title, body, labels, stream='alerts', footer=footer)
     action = result['action']
     url = result.get('issue_url', 'N/A')
 
@@ -417,7 +427,7 @@ def run(config: Config) -> NoReturn:
     latest_rows = download_snapshot(config.snapshot_url, REQUIRED_COLUMNS, optional_columns=config.fields)
     print(f"Downloaded {len(latest_rows)} rows")
 
-    _check_freshness_or_exit(config, latest_rows, labels, client)
+    snapshot_date = _check_freshness_or_exit(config, latest_rows, labels, client)
 
     filtered_latest = filter_to_watchlist(latest_rows, watchlist)
     print(f"Filtered to {len(filtered_latest)} monitored sites")
@@ -435,7 +445,12 @@ def run(config: Config) -> NoReturn:
         _exit_no_alerts(rotation_stalled)
 
     _publish_alerts(
-        config, client, render_alerts(all_alerts, config.max_changes), labels, len(all_alerts)
+        config,
+        client,
+        render_alerts(all_alerts, config.max_changes),
+        render_footer(snapshot_date),
+        labels,
+        len(all_alerts)
     )
 
 
