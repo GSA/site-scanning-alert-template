@@ -18,16 +18,24 @@ from rules import (
 
 
 class TestAlertRendering(unittest.TestCase):
-    def test_alert_to_line_change(self):
+    def test_alert_to_bullet_change(self):
         alert = Alert("test.gov", "live", "true", "false", "change")
-        line = alert.to_line()
-        self.assertIn("test.gov", line)
-        self.assertIn("live: true -> false", line)
+        # The domain is deliberately absent - render_alerts supplies it as the
+        # parent bullet. Leading indent nests this inside that bullet.
+        self.assertEqual(alert.to_bullet(), "  - `live`: true → false")
 
     def test_alert_blank_rendering(self):
         alert = Alert("test.gov", "status_code", "200", "", "change")
-        line = alert.to_line()
-        self.assertIn("(no data)", line)
+        bullet = alert.to_bullet()
+        self.assertIn("(no data)", bullet)
+
+    def test_state_alert_bullet_has_no_transition(self):
+        alert = Alert("test.gov", "status_code", "", "503", "state")
+        self.assertEqual(alert.to_bullet(), "  - `status_code`: 503 (current value)")
+
+    def test_corpus_alert_bullet_is_capitalized_message(self):
+        alert = Alert("test.gov", "", "", "newly in snapshot", "corpus")
+        self.assertEqual(alert.to_bullet(), "  - Newly in snapshot")
 
 
 class TestChangeDiff(unittest.TestCase):
@@ -227,9 +235,75 @@ class TestRenderAlerts(unittest.TestCase):
 
         body = render_alerts(alerts, max_changes=10)
 
-        self.assertIn("test1.gov", body)
-        self.assertIn("test2.gov", body)
-        self.assertIn("live: true -> false", body)
+        self.assertIn("- **test1.gov**", body)
+        self.assertIn("- **test2.gov**", body)
+        self.assertIn("  - `live`: true → false", body)
+
+    def test_render_uses_no_markdown_headings(self):
+        """
+        An issue body starts below the issue title, so headings injected here
+        land at the wrong level in the document outline. Sites are nested list
+        items instead.
+        """
+        alerts = [
+            Alert("test.gov", "live", "true", "false", "change"),
+            Alert("other.gov", "", "", "newly in snapshot", "corpus"),
+        ]
+
+        body = render_alerts(alerts, max_changes=10)
+
+        for line in body.splitlines():
+            self.assertFalse(line.startswith("#"), f"heading in body: {line!r}")
+
+    def test_render_groups_multiple_findings_under_one_site(self):
+        """Findings for one site share a parent bullet - the point of grouping."""
+        alerts = [
+            Alert("test.gov", "live", "true", "false", "change"),
+            Alert("test.gov", "status_code", "200", "502", "change"),
+            Alert("test.gov", "primary_scan_status", "completed", "timeout", "change"),
+        ]
+
+        body = render_alerts(alerts, max_changes=10)
+
+        self.assertEqual(body.count("- **test.gov**"), 1)
+        self.assertIn(
+            "- **test.gov**\n"
+            "  - `live`: true → false\n"
+            "  - `status_code`: 200 → 502\n"
+            "  - `primary_scan_status`: completed → timeout",
+            body,
+        )
+
+    def test_render_orders_sites_alphabetically(self):
+        alerts = [
+            Alert("zebra.gov", "live", "true", "false", "change"),
+            Alert("apple.gov", "live", "true", "false", "change"),
+            Alert("mango.gov", "live", "true", "false", "change"),
+        ]
+
+        body = render_alerts(alerts, max_changes=10)
+
+        self.assertLess(body.index("apple.gov"), body.index("mango.gov"))
+        self.assertLess(body.index("mango.gov"), body.index("zebra.gov"))
+
+    def test_render_keeps_sites_in_one_tight_list(self):
+        """No blank line between sites, so it renders as one list, not many."""
+        alerts = [
+            Alert("a.gov", "live", "true", "false", "change"),
+            Alert("b.gov", "live", "true", "false", "change"),
+        ]
+
+        body = render_alerts(alerts, max_changes=10)
+
+        self.assertIn("  - `live`: true → false\n- **b.gov**", body)
+
+    def test_render_keeps_intro_and_closing(self):
+        alerts = [Alert("test.gov", "live", "true", "false", "change")]
+
+        body = render_alerts(alerts, max_changes=10)
+
+        self.assertIn("Site Scanning results have changed", body)
+        self.assertIn("Please investigate as appropriate.", body)
 
     def test_render_exceeds_max(self):
         alerts = [Alert(f"test{i}.gov", "live", "true", "false", "change") for i in range(30)]

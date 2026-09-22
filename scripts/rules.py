@@ -31,16 +31,25 @@ class Alert:
     new_value: str
     alert_type: str = "change"  # 'change', 'state', 'corpus'
 
-    def to_line(self) -> str:
-        """Format as issue body line."""
+    def to_bullet(self) -> str:
+        """
+        Format as a nested bullet, without the domain - render_alerts nests
+        these under a per-domain bullet, so repeating it here would be noise.
+
+        Indented two spaces to sit inside the parent list item.
+        """
         if self.alert_type == "state":
-            return f"initial_domain: {self.domain}\n{self.field}: {self.new_value}"
+            # State alerts have no old_value (see evaluate_state_check), so
+            # the suffix keeps this from reading as a change missing its half.
+            return f"  - `{self.field}`: {self.new_value} (current value)"
         if self.alert_type == "corpus":
-            return f"initial_domain: {self.domain}\n{self.new_value}"  # message in new_value
+            # Message is in new_value, lowercase; capitalize it as a sentence.
+            message = self.new_value
+            return f"  - {message[:1].upper()}{message[1:]}"
 
         old = self.old_value or "(no data)"
         new = self.new_value or "(no data)"
-        return f"initial_domain: {self.domain}\n{self.field}: {old} -> {new}"
+        return f"  - `{self.field}`: {old} → {new}"
 
     def dedupe_key(self) -> Tuple[str, str]:
         """
@@ -243,6 +252,19 @@ def summarize_alerts(alerts: List[Alert]) -> str:
     return "\n".join(lines)
 
 
+def _group_by_domain(alerts: List[Alert]) -> List[Tuple[str, List[Alert]]]:
+    """
+    Group alerts by domain, domains ordered alphabetically.
+
+    sorted() is stable, so alerts for the same domain keep their original
+    relative order within that domain's group.
+    """
+    grouped: Dict[str, List[Alert]] = {}
+    for alert in sorted(alerts, key=lambda a: a.domain):
+        grouped.setdefault(alert.domain, []).append(alert)
+    return list(grouped.items())
+
+
 def render_alerts(alerts: List[Alert], max_changes: int) -> str:
     """
     Render alerts as issue body text.
@@ -260,9 +282,16 @@ def render_alerts(alerts: List[Alert], max_changes: int) -> str:
     if len(alerts) > max_changes:
         detail = summarize_alerts(alerts)
     else:
-        # Enumerate all, grouped by domain. sorted() is stable, so alerts for
-        # the same domain keep their original relative order.
-        detail = "\n\n".join(alert.to_line() for alert in sorted(alerts, key=lambda a: a.domain))
+        # One bullet per affected site, its findings nested underneath, so a
+        # reader scans sites first and only drills into the ones they own.
+        # Deliberately a nested list rather than per-site headings: an issue
+        # body starts below the title, so injecting headings here lands them
+        # at the wrong level in the document outline. No blank lines between
+        # sites - that keeps it one tight list instead of many loose ones.
+        detail = "\n".join(
+            f"- **{domain}**\n" + "\n".join(alert.to_bullet() for alert in domain_alerts)
+            for domain, domain_alerts in _group_by_domain(alerts)
+        )
 
     return (
         "❗ Site Scanning results have changed for websites that you are monitoring:\n\n"
