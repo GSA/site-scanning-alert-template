@@ -5,9 +5,10 @@ Alert rule evaluation for Site Scanning data.
 Implements change-detection (latest vs previous) and state-check (bad current values)
 with configurable noise suppression.
 """
+
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
-from collections import Counter
 
 # One snapshot row: CSV column name -> value. Deliberately re-declared here
 # rather than imported from snapshot.py - this module is pure logic with no
@@ -28,20 +29,20 @@ class Alert:
     field: str
     old_value: str
     new_value: str
-    alert_type: str = 'change'  # 'change', 'state', 'corpus'
+    alert_type: str = "change"  # 'change', 'state', 'corpus'
 
     def to_bullet(self) -> str:
         """
         Format as a single bullet line, without the domain (the caller
         groups bullets under a per-domain heading - see _group_by_domain).
         """
-        if self.alert_type == 'state':
+        if self.alert_type == "state":
             return f"- `{self.field}`: {self.new_value} (current value)"
-        if self.alert_type == 'corpus':
+        if self.alert_type == "corpus":
             return f"- {self.new_value}"  # message in new_value
 
-        old = self.old_value or '(no data)'
-        new = self.new_value or '(no data)'
+        old = self.old_value or "(no data)"
+        new = self.new_value or "(no data)"
         return f"- `{self.field}`: {old} -> {new}"
 
     def dedupe_key(self) -> Tuple[str, str]:
@@ -53,7 +54,7 @@ class Alert:
         no field, so they key on their message instead and never collide
         with change/state alerts.
         """
-        if self.alert_type == 'corpus':
+        if self.alert_type == "corpus":
             return (self.domain, self.new_value)
         return (self.domain, self.field)
 
@@ -63,7 +64,7 @@ def _should_ignore_change(
     old: str,
     new: str,
     ignore_blank_transitions: bool,
-    ignore_transitions: Set[Transition]
+    ignore_transitions: Set[Transition],
 ) -> bool:
     """Determine whether a field value transition should be ignored."""
     if old == new:
@@ -79,16 +80,16 @@ def _diff_domain_fields(
     latest_row: Row,
     fields: List[str],
     ignore_blank_transitions: bool,
-    ignore_transitions: Set[Transition]
+    ignore_transitions: Set[Transition],
 ) -> List[Alert]:
     """Find changed fields between previous and latest snapshots for a single domain."""
     alerts = []
     for field in fields:
-        old = prev_row.get(field, '')
-        new = latest_row.get(field, '')
+        old = prev_row.get(field, "")
+        new = latest_row.get(field, "")
         if _should_ignore_change(field, old, new, ignore_blank_transitions, ignore_transitions):
             continue
-        alerts.append(Alert(domain, field, old, new, 'change'))
+        alerts.append(Alert(domain, field, old, new, "change"))
     return alerts
 
 
@@ -97,7 +98,7 @@ def evaluate_change_diff(
     previous_rows: List[Row],
     fields: List[str],
     ignore_blank_transitions: bool = False,
-    ignore_transitions: Optional[Set[Transition]] = None
+    ignore_transitions: Optional[Set[Transition]] = None,
 ) -> List[Alert]:
     """
     Detect changes between latest and previous snapshots.
@@ -115,8 +116,8 @@ def evaluate_change_diff(
     ignore_transitions = ignore_transitions or set()
 
     # Build lookup: initial_domain -> row dict
-    prev_map = {row['initial_domain']: row for row in previous_rows}
-    latest_map = {row['initial_domain']: row for row in latest_rows}
+    prev_map = {row["initial_domain"]: row for row in previous_rows}
+    latest_map = {row["initial_domain"]: row for row in latest_rows}
 
     alerts = []
 
@@ -124,16 +125,23 @@ def evaluate_change_diff(
     for domain, latest_row in latest_map.items():
         prev_row = prev_map.get(domain)
         if prev_row is None:
-            alerts.append(Alert(domain, '', '', 'newly in snapshot', 'corpus'))
+            alerts.append(Alert(domain, "", "", "newly in snapshot", "corpus"))
             continue
 
-        alerts.extend(_diff_domain_fields(
-            domain, prev_row, latest_row, fields, ignore_blank_transitions, ignore_transitions
-        ))
+        alerts.extend(
+            _diff_domain_fields(
+                domain,
+                prev_row,
+                latest_row,
+                fields,
+                ignore_blank_transitions,
+                ignore_transitions,
+            )
+        )
 
     # Check for domains that disappeared
     alerts.extend(
-        Alert(domain, '', '', 'no longer in snapshot', 'corpus')
+        Alert(domain, "", "", "no longer in snapshot", "corpus")
         for domain in prev_map
         if domain not in latest_map
     )
@@ -145,7 +153,7 @@ def evaluate_state_check(
     latest_rows: List[Row],
     alert_on_status_codes: Set[str],
     alert_on_scan_status: Set[str],
-    alert_on_not_live: bool
+    alert_on_not_live: bool,
 ) -> List[Alert]:
     """
     Check current state for bad values.
@@ -155,27 +163,27 @@ def evaluate_state_check(
         alert_on_status_codes: Set of status_code values to alert on (e.g. {'500', '503'})
         alert_on_scan_status: Set of primary_scan_status values to alert on
         alert_on_not_live: If True, alert when live=false
-    
+
     Returns:
         List of Alert objects
     """
     alerts = []
 
     for row in latest_rows:
-        domain = row['initial_domain']
+        domain = row["initial_domain"]
 
-        status_code = row.get('status_code', '')
+        status_code = row.get("status_code", "")
         if status_code in alert_on_status_codes:
-            alerts.append(Alert(domain, 'status_code', '', status_code, 'state'))
+            alerts.append(Alert(domain, "status_code", "", status_code, "state"))
 
-        scan_status = row.get('primary_scan_status', '')
+        scan_status = row.get("primary_scan_status", "")
         if scan_status in alert_on_scan_status:
-            alerts.append(Alert(domain, 'primary_scan_status', '', scan_status, 'state'))
+            alerts.append(Alert(domain, "primary_scan_status", "", scan_status, "state"))
 
         # `live` is compared case-insensitively; the snapshot is not
         # consistent about 'false' vs 'False'.
-        if alert_on_not_live and row.get('live', '').lower() == 'false':
-            alerts.append(Alert(domain, 'live', '', 'false', 'state'))
+        if alert_on_not_live and row.get("live", "").lower() == "false":
+            alerts.append(Alert(domain, "live", "", "false", "state"))
 
     return alerts
 
@@ -195,7 +203,7 @@ def dedupe_alerts(alerts: List[Alert]) -> List[Alert]:
     Order-preserving and independent of whether change or state alerts were
     appended first.
     """
-    change_keys = {a.dedupe_key() for a in alerts if a.alert_type == 'change'}
+    change_keys = {a.dedupe_key() for a in alerts if a.alert_type == "change"}
 
     deduped = []
     seen = set()
@@ -203,7 +211,7 @@ def dedupe_alerts(alerts: List[Alert]) -> List[Alert]:
         key = alert.dedupe_key()
 
         # A change alert for this domain/field already covers this state alert.
-        if key in seen or (alert.alert_type == 'state' and key in change_keys):
+        if key in seen or (alert.alert_type == "state" and key in change_keys):
             continue
 
         seen.add(key)
@@ -235,7 +243,7 @@ def summarize_alerts(alerts: List[Alert]) -> str:
         *(f"  - {domain}: {count} changes" for domain, count in by_domain.most_common(10)),
     ]
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def _group_by_domain(alerts: List[Alert]) -> List[Tuple[str, List[Alert]]]:
@@ -274,7 +282,7 @@ def render_alerts(alerts: List[Alert], max_changes: int) -> str:
         f"**{domain}**\n" + "\n".join(a.to_bullet() for a in domain_alerts)
         for domain, domain_alerts in groups
     )
-    finding_word = 'finding' if len(alerts) == 1 else 'findings'
+    finding_word = "finding" if len(alerts) == 1 else "findings"
     header = (
         f"❗ **Site Scanning flagged {len(groups)} of your monitored website(s)** "
         f"({len(alerts)} {finding_word}):"
@@ -306,8 +314,8 @@ def _parse_transition(entry: str) -> Optional[Transition]:
     """Parse one 'field:old->new' entry into a (field, old, new) tuple, or
     None if it's blank or malformed."""
     try:
-        field, old_to_new = entry.split(':', 1)
-        old, new = old_to_new.split('->', 1)
+        field, old_to_new = entry.split(":", 1)
+        old, new = old_to_new.split("->", 1)
     except ValueError:
         return None
     return (field.strip(), old.strip(), new.strip())
@@ -325,5 +333,5 @@ def parse_ignore_transitions(ignore_str: str) -> Set[Transition]:
     Returns:
         Set of (field, old, new) tuples
     """
-    parsed = (_parse_transition(entry) for entry in ignore_str.split(','))
+    parsed = (_parse_transition(entry) for entry in ignore_str.split(","))
     return {transition for transition in parsed if transition is not None}

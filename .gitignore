@@ -27,6 +27,10 @@ htmlcov/
 .tox/
 .hypothesis/
 
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+
 # IDEs
 .vscode/
 .idea/

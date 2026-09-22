@@ -5,13 +5,13 @@ Snapshot loading and filtering for Site Scanning data.
 Downloads and parses Site Scanning CSV snapshots with filtered column projection
 to minimize memory use on large files (~45 MB, ~30k rows).
 """
+
 import csv
-import urllib.request
+import time
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
-import time
-
 
 # One parsed snapshot row: CSV column name -> value (never None; see _parse).
 Row = Dict[str, str]
@@ -19,28 +19,29 @@ Row = Dict[str, str]
 
 # Columns needed for alert evaluation
 REQUIRED_COLUMNS = [
-    'initial_domain',
-    'initial_base_domain',
-    'live',
-    'status_code',
-    'primary_scan_status',
-    'scan_date'
+    "initial_domain",
+    "initial_base_domain",
+    "live",
+    "status_code",
+    "primary_scan_status",
+    "scan_date",
 ]
 
 # Watchlist entry prefix selecting base-domain (rather than exact) matching,
 # and the two snapshot columns those two modes compare against.
-BASE_PREFIX = 'base:'
-MATCH_COLUMNS = ('initial_domain', 'initial_base_domain')
+BASE_PREFIX = "base:"
+MATCH_COLUMNS = ("initial_domain", "initial_base_domain")
 
 
 class SnapshotError(Exception):
     """Raised when snapshot loading or validation fails."""
+
     pass
 
 
 def _fetch_attempt(url: str) -> bytes:
     """Execute a single HTTP request for snapshot bytes."""
-    req = urllib.request.Request(url, headers={'User-Agent': 'GSA-Site-Scanning-Alert-Action'})
+    req = urllib.request.Request(url, headers={"User-Agent": "GSA-Site-Scanning-Alert-Action"})
     with urllib.request.urlopen(req, timeout=180) as response:
         return response.read()
 
@@ -54,7 +55,9 @@ def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
         SnapshotError: If retry_count is exhausted (or zero) without a
             successful fetch.
     """
-    last_error = SnapshotError(f"Failed to fetch {url}: no attempts made (retry_count={retry_count})")
+    last_error = SnapshotError(
+        f"Failed to fetch {url}: no attempts made (retry_count={retry_count})"
+    )
 
     for attempt in range(retry_count):
         try:
@@ -62,7 +65,7 @@ def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
         except urllib.error.HTTPError as e:
             last_error = SnapshotError(f"HTTP {e.code} from {url}: {e.reason}")
             if e.code in (403, 404, 410):  # Client errors - don't retry
-                raise last_error
+                raise last_error from e
         except urllib.error.URLError as e:
             last_error = SnapshotError(f"Failed to fetch {url}: {e.reason}")
 
@@ -75,7 +78,7 @@ def _fetch(url: str, retry_count: int, retry_delay: float) -> bytes:
 def _determine_columns_to_keep(
     fieldnames: List[str],
     wanted_columns: Optional[List[str]],
-    optional_columns: Optional[List[str]]
+    optional_columns: Optional[List[str]],
 ) -> Set[str]:
     """Determine the set of columns to project from available CSV headers."""
     available = set(fieldnames)
@@ -85,12 +88,12 @@ def _determine_columns_to_keep(
         missing = set(wanted_columns) - available
         if missing:
             raise SnapshotError(
-                f"Snapshot missing required columns: {', '.join(sorted(missing))}"
+                f"Snapshot missing required columns: {', '.join(sorted(missing))}",
             )
         keep = set(wanted_columns)
 
     if optional_columns:
-        keep |= (set(optional_columns) & available)
+        keep |= set(optional_columns) & available
 
     return keep
 
@@ -99,7 +102,7 @@ def _parse(
     raw: bytes,
     url: str,
     wanted_columns: Optional[List[str]],
-    optional_columns: Optional[List[str]]
+    optional_columns: Optional[List[str]],
 ) -> List[Row]:
     """
     Parse and project a downloaded snapshot's CSV bytes.
@@ -112,12 +115,12 @@ def _parse(
         SnapshotError: If the CSV has no header, is missing a required
             (wanted) column, or has zero data rows.
     """
-    csv.field_size_limit(10 ** 7)  # Handle Site Scanning's 2000-char truncated fields
+    csv.field_size_limit(10**7)  # Handle Site Scanning's 2000-char truncated fields
 
     try:
-        reader = csv.DictReader(raw.decode('utf-8', errors='replace').splitlines())
+        reader = csv.DictReader(raw.decode("utf-8", errors="replace").splitlines())
     except (csv.Error, UnicodeDecodeError) as e:
-        raise SnapshotError(f"Failed to parse CSV from {url}: {e}")
+        raise SnapshotError(f"Failed to parse CSV from {url}: {e}") from e
 
     if reader.fieldnames is None:
         raise SnapshotError(f"Snapshot at {url} has no header row")
@@ -125,12 +128,9 @@ def _parse(
     keep = _determine_columns_to_keep(reader.fieldnames, wanted_columns, optional_columns)
 
     try:
-        rows = [
-            {k: (v or '') for k, v in row.items() if k in keep}
-            for row in reader
-        ]
+        rows = [{k: (v or "") for k, v in row.items() if k in keep} for row in reader]
     except csv.Error as e:
-        raise SnapshotError(f"Failed to parse CSV from {url}: {e}")
+        raise SnapshotError(f"Failed to parse CSV from {url}: {e}") from e
 
     if not rows:
         raise SnapshotError(f"Snapshot at {url} contains zero rows")
@@ -143,7 +143,7 @@ def download_snapshot(
     wanted_columns: Optional[List[str]] = None,
     retry_count: int = 3,
     retry_delay: float = 2.0,
-    optional_columns: Optional[List[str]] = None
+    optional_columns: Optional[List[str]] = None,
 ) -> List[Row]:
     """
     Download and parse a Site Scanning CSV snapshot.
@@ -188,13 +188,13 @@ def _match_column(entry: str) -> Tuple[str, str]:
     """
     entry = entry.strip()
     if entry.startswith(BASE_PREFIX):
-        return 'initial_base_domain', entry[len(BASE_PREFIX):].lower()
-    return 'initial_domain', entry.lower()
+        return "initial_base_domain", entry[len(BASE_PREFIX) :].lower()
+    return "initial_domain", entry.lower()
 
 
 def _column_values(rows: List[Row], column: str) -> Set[str]:
     """Collect the lowercased values of one column across rows."""
-    return {row.get(column, '').lower() for row in rows}
+    return {row.get(column, "").lower() for row in rows}
 
 
 def filter_to_watchlist(rows: List[Row], watchlist: List[str]) -> List[Row]:
@@ -215,8 +215,9 @@ def filter_to_watchlist(rows: List[Row], watchlist: List[str]) -> List[Row]:
         wanted.setdefault(column, set()).add(value)
 
     return [
-        row for row in rows
-        if any(row.get(column, '').lower() in values for column, values in wanted.items())
+        row
+        for row in rows
+        if any(row.get(column, "").lower() in values for column, values in wanted.items())
     ]
 
 
@@ -249,30 +250,30 @@ def find_unmatched_entries(rows: List[Row], watchlist: List[str]) -> List[str]:
 def parse_scan_date(scan_date_str: str) -> Optional[datetime]:
     """
     Parse scan_date field to datetime.
-    
+
     Args:
         scan_date_str: ISO8601 datetime string from snapshot
-    
+
     Returns:
         datetime object, or None if parsing fails
     """
     if not scan_date_str:
         return None
-    
+
     try:
         # Handle both "2026-09-02T08:11:41.911Z" and "2026-09-02" formats.
         # Both are normalized to UTC-aware datetimes - a naive datetime
         # from the date-only format would otherwise raise TypeError when
         # compared against the tz-aware datetime parsed from the other
         # format (e.g. in has_snapshot_rotated).
-        normalized = scan_date_str.replace('Z', '+00:00') if 'T' in scan_date_str else scan_date_str
+        normalized = scan_date_str.replace("Z", "+00:00") if "T" in scan_date_str else scan_date_str
         parsed = datetime.fromisoformat(normalized)
 
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
 
         return parsed
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError):  # fmt: skip
         return None
 
 
@@ -280,15 +281,14 @@ def _max_scan_date(rows: List[Row]) -> Optional[datetime]:
     """Parse each row's scan_date and return the latest, or None if rows is
     empty or none of its scan_date values parse."""
     dates = [
-        d for d in (parse_scan_date(row.get('scan_date', '')) for row in rows)
-        if d is not None
+        d for d in (parse_scan_date(row.get("scan_date", "")) for row in rows) if d is not None
     ]
     return max(dates) if dates else None
 
 
 def check_snapshot_freshness(
     rows: List[Row],
-    max_age_days: int
+    max_age_days: int,
 ) -> Tuple[bool, Optional[str]]:
     """
     Check if snapshot is fresh enough to use.
@@ -307,12 +307,12 @@ def check_snapshot_freshness(
 
     age = datetime.now(max_date.tzinfo) - max_date
 
-    return age.days <= max_age_days, max_date.strftime('%Y-%m-%d')
+    return age.days <= max_age_days, max_date.strftime("%Y-%m-%d")
 
 
 def has_snapshot_rotated(
     latest_rows: List[Row],
-    previous_rows: List[Row]
+    previous_rows: List[Row],
 ) -> bool:
     """
     Check if latest snapshot is newer than previous (i.e., rotation has occurred).

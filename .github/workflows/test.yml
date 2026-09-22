@@ -28,3 +28,32 @@ jobs:
       - name: Run documentation checks
         run: |
           python3 -m unittest tests.test_docs -v
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.14'
+
+      # First and only pip install in this repo's CI. It installs lint tooling
+      # into the runner, NOT into the action's runtime: the `test` job above and
+      # action.yml both still run on a bare interpreter, so the stdlib-only
+      # runtime constraint is unaffected. Version pinned in pyproject.toml
+      # [dependency-groups].dev and re-asserted by [tool.ruff] required-version.
+      - name: Install lint tooling
+        run: |
+          python3 -m pip install --group dev
+
+      - name: Lint
+        run: |
+          ruff check --output-format=github .
+
+      - name: Check formatting
+        run: |
+          ruff format --check --diff .
