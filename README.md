@@ -120,7 +120,7 @@ The action is configured via inputs in `.github/workflows/site-scanning-alerts.y
 | `fields` | `live,status_code,primary_scan_status` | Comma-separated list of fields to monitor for changes (change mode only). Any column present in the Site Scanning snapshot is supported (e.g. live, status_code, primary_scan_status, https_enforced, hsts). Unrecognized field names are reported in the step summary and skipped |
 | `alert_on_status_codes` | `500,502,503,504` | Comma-separated list of HTTP status codes to alert on (state mode). Example: 500,502,503,504 |
 | `alert_on_scan_status` | *(empty)* | Comma-separated list of primary_scan_status values to alert on (state mode). Leave empty to disable. Example: connection_refused,invalid_ssl_cert |
-| `alert_on_not_live` | `false` | Alert when monitored sites have live=false (state mode) |
+| `alert_on_not_live` | `true` | Alert when monitored sites have live=false (state mode). Defaults on - a fully unreachable site has a blank status_code and a primary_scan_status outside the empty-by-default alert_on_scan_status set, so without this a hard-down site produces no state findings at all. Costs one finding per non-live site on every run it stays down |
 | `ignore_blank_transitions` | `false` | Suppress alerts for value -> blank and blank -> value transitions. When false, renders blanks as "(no data)" |
 | `ignore_transitions` | *(see below)* | Comma-separated list of specific transitions to suppress, format: field:old_value->new_value. Default suppresses transient status flapping |
 | `max_changes` | `25` | Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines |
@@ -169,6 +169,8 @@ For detailed remediation guidance on each scan status, see [GSA's Scan Statuses 
 
 Real-world data (2026-09-02 snapshot): **63% of `live` changes and 62% of `primary_scan_status` changes are artifacts** — value↔blank transitions or transient flapping (`completed`↔`timeout`). The action's defaults suppress the most common noise while preserving genuine signal.
 
+These percentages count *change-detection* findings only, measured under the defaults in force at the time - they have not been recomputed since. `alert_on_not_live` now defaults to `true`, which adds a state-mode finding for every non-live site on every run; that stream isn't reflected in the numbers below.
+
 ### Noise by the Numbers
 
 From a typical day's diff of 29,668 sites:
@@ -184,7 +186,7 @@ From a typical day's diff of 29,668 sites:
 
 ### Strategies
 
-**For Model 1 (exact domains):** Default settings work well. Most watchlists see 0-5 changes/day.
+**For Model 1 (exact domains):** Default settings work well. Most watchlists see 0-5 change findings/day. One thing to know: because `alert_on_not_live` defaults to `true`, a site sitting at `live=false` produces one state finding on *every* run until it recovers - deliberate, so a hard-down site doesn't go quiet after its day-one change alert, but a chronically non-live domain becomes a permanent line in every findings set. Drop it from the watchlist, or set `alert_on_not_live: 'false'`, if that's noise you don't want.
 
 **For Model 2 (`base:large-agency.gov`):** You'll hit noise. Options:
 
@@ -212,6 +214,7 @@ ignore_transitions: 'primary_scan_status:completed->timeout,primary_scan_status:
 | Too many alerts (100+ changes) | Large `base:` watchlist + noisy domain | Raise `max_changes` to get a summary, or switch to exact-domain Model 1 for critical sites only |
 | "Snapshot is stale" message | Upstream scanning engine hasn't run | The action reports staleness instead of flooding with change alerts, and files a "data is stale" issue. Check the [Site Scanning engine's workflows](https://github.com/GSA/site-scanning-engine/actions). Once fresh data returns, close the staleness issue manually - the action doesn't auto-comment or auto-close it. |
 | Nothing since \<date\> but sites are fine | Snapshot rotation cadence | Snapshots rotate once daily at 15:00 UTC. The action runs at 15:30 UTC to catch the fresh data. |
+| A state alert for every non-live site, every single run | `alert_on_not_live` defaults to `true` | Deliberate - a fully unreachable site produces no other finding, so with this off `mode: both` goes silent after the day-one change alert. The cost is a standing finding for as long as the site is down. Remove the domain from the watchlist if it's known-dead, or set `alert_on_not_live: 'false'` to go back to change-only detection for it |
 | Empty watchlist warning | `watchlist.txt` has only comments/blanks | Add at least one domain (uncomment an example or add your own) |
 | "No alerts this run" | No findings this run | Expected when everything's healthy. In `mode: change`, this can also mean "nothing changed since yesterday" - which is not the same as "recovered" for a sustained outage. Switch to `mode: state` or `mode: both` if you need the action to actively confirm current health rather than only detect transitions. |
 | "Invalid `mode`" error, workflow fails | `mode` input misspelled or unsupported | `mode` must be exactly `change`, `state`, or `both`. Fix the typo in the workflow file. |

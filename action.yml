@@ -32,9 +32,9 @@ inputs:
     default: ''
   
   alert_on_not_live:
-    description: 'Alert when monitored sites have live=false (state mode)'
+    description: 'Alert when monitored sites have live=false (state mode). Defaults on: a fully unreachable site has no status_code and a primary_scan_status outside alert_on_scan_status, so without this a hard-down site produces no state findings at all.'
     required: false
-    default: 'false'
+    default: 'true'
   
   ignore_blank_transitions:
     description: 'Suppress alerts for value -> blank and blank -> value transitions. When false, renders blanks as "(no data)"'
