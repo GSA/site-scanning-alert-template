@@ -13,6 +13,7 @@ lifecycle; revisit if the noise becomes a real problem.
 
 import hashlib
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +24,51 @@ from typing import Dict, List, Optional
 MAX_ISSUE_PAGES = 5
 
 MARKER_PREFIX = "<!-- site-scanning-alert:"
+
+# Retry shape for _request, mirroring snapshot._fetch's constants.
+API_TIMEOUT_SECONDS = 30
+API_RETRY_COUNT = 3
+API_RETRY_DELAY = 2.0
+MAX_RETRY_AFTER_SECONDS = 60
+
+# A 403 is only worth retrying when GitHub's abuse-detection / secondary
+# rate limit kicked in - a permissions 403 will never succeed no matter
+# how many times it's retried.
+SECONDARY_RATE_LIMIT_MARKERS = ("secondary rate limit", "abuse detection")
+
+
+def _is_retryable_status(code: int, body: str) -> bool:
+    """
+    Determine whether an HTTP status response is worth retrying.
+
+    5xx and 429 are always transient. A 403 is only transient when the
+    body indicates GitHub's secondary rate limit or abuse detection - a
+    permissions 403 will never succeed no matter how many times it's
+    retried.
+    """
+    if code == 429 or 500 <= code < 600:
+        return True
+    if code == 403:
+        lowered = body.lower()
+        return any(marker in lowered for marker in SECONDARY_RATE_LIMIT_MARKERS)
+    return False
+
+
+def _retry_after_seconds(headers, fallback: float) -> float:
+    """
+    Read a Retry-After header if present, capped so a hostile or
+    misconfigured header can't park the job for hours.
+
+    Only the integer-seconds form is honored; the HTTP-date form falls
+    back to the caller's own backoff delay rather than parsing a date.
+    """
+    raw = headers.get("Retry-After") if headers else None
+    if raw is None:
+        return fallback
+    try:
+        return min(float(raw), MAX_RETRY_AFTER_SECONDS)
+    except ValueError:
+        return fallback
 
 
 def _find_issue_with_marker(issues: List[Dict], marker: str) -> Optional[Dict]:
@@ -67,35 +113,70 @@ class IssueClient:
         method: str,
         path: str,
         data: Optional[Dict] = None,
+        retry_on_network_error: bool = False,
     ) -> Dict:
-        """Make authenticated GitHub API request."""
+        """
+        Make an authenticated GitHub API request, retrying transient
+        failures.
+
+        Args:
+            retry_on_network_error: Whether a URLError/TimeoutError (as
+                opposed to an HTTP status response) is safe to retry.
+                Defaults to False - the safe default - because a network
+                error on a POST means the request may already have
+                succeeded server-side, and retrying it risks a duplicate
+                (e.g. filing a second issue, or a 422 on a label that was
+                actually created). GET call sites opt in explicitly; POST
+                call sites inherit the safe default. An HTTP *status*
+                response (5xx/429/secondary-403) is retried for either
+                verb, since it proves the server rejected rather than
+                maybe-applied the request.
+        """
         url = f"{self.base_url}{path}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
         }
-
         req_data = json.dumps(data).encode() if data else None
-        req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
 
-        try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                return json.loads(response.read().decode())
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode() if e.fp else ""
-            raise RuntimeError(
-                f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}"
-            ) from e
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
+        last_error = RuntimeError(f"GitHub API {method} {path} failed: no attempts made")
+        for attempt in range(API_RETRY_COUNT):
+            req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
+            sleep_for = API_RETRY_DELAY * (attempt + 1)
+
+            try:
+                with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as response:
+                    return json.loads(response.read().decode())
+            except urllib.error.HTTPError as e:
+                # HTTPError subclasses URLError, so this clause must come first.
+                error_body = e.read().decode() if e.fp else ""
+                last_error = RuntimeError(
+                    f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}"
+                )
+                if not _is_retryable_status(e.code, error_body):
+                    raise last_error from e
+                sleep_for = _retry_after_seconds(e.headers, sleep_for)
+            except (urllib.error.URLError, TimeoutError) as e:
+                # A bare TimeoutError (not wrapped in URLError) is what
+                # urlopen(timeout=...) raises on a read timeout.
+                last_error = RuntimeError(
+                    f"GitHub API {method} {path} failed: {getattr(e, 'reason', e)}"
+                )
+                if not retry_on_network_error:
+                    raise last_error from e
+
+            if attempt < API_RETRY_COUNT - 1:
+                time.sleep(sleep_for)
+
+        raise last_error
 
     def ensure_label(self, label: str, color: str = "0366d6", description: str = "") -> None:
         """Create label if it doesn't exist (idempotent)."""
         # Check existence via GET /labels/:name (404 = doesn't exist)
         encoded = urllib.parse.quote(label, safe="")
         try:
-            self._request("GET", f"/labels/{encoded}")
+            self._request("GET", f"/labels/{encoded}", retry_on_network_error=True)
             return  # Already exists
         except RuntimeError as e:
             if "HTTP 404" not in str(e):
@@ -131,7 +212,7 @@ class IssueClient:
         label_str = ",".join(urllib.parse.quote_plus(label) for label in labels)
         for page in range(1, MAX_ISSUE_PAGES + 1):
             path = f"/issues?labels={label_str}&state=open&per_page=100&page={page}"
-            issues = self._request("GET", path)
+            issues = self._request("GET", path, retry_on_network_error=True)
 
             if not issues:
                 return None
@@ -168,6 +249,9 @@ class IssueClient:
             "labels": labels,
         }
 
+        # Inherits _request's safe default (retry_on_network_error=False):
+        # a URLError/timeout here may mean the issue was already created
+        # server-side, and retrying would risk filing a duplicate.
         result = self._request("POST", "/issues", data)
         return {
             "number": result["number"],
