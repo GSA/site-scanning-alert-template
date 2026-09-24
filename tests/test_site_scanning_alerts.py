@@ -199,6 +199,7 @@ class TestBooleanDefaultsMatchActionYml(unittest.TestCase):
     BOOLEAN_INPUTS = {
         "alert_on_not_live": "alert_on_not_live",
         "ignore_blank_transitions": "ignore_blank_transitions",
+        "report_recoveries": "report_recoveries",
         "fail_on_alert": "fail_on_alert",
         "dry_run": "dry_run",
     }
@@ -611,6 +612,61 @@ class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
 
         self.assertEqual(cm.exception.code, 0)
         self.assertIn("alerts", calls)
+
+    def test_recovery_only_run_files_nothing_by_default(self):
+        self._write_watchlist(["test3.gov"])
+
+        latest = [
+            {
+                "initial_domain": "test3.gov",
+                "initial_base_domain": "test3.gov",
+                "live": "true",
+                "status_code": "200",
+                "primary_scan_status": "completed",
+                "scan_date": "2026-09-02T10:00:00Z",
+            }
+        ]
+        previous = [
+            dict(latest[0], primary_scan_status="timeout", scan_date="2026-09-01T10:00:00Z")
+        ]
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            return previous if "previous" in url else latest
+
+        code = self._run_main({}, fake_download)
+
+        self.assertEqual(code, 0)
+        summary = self._read_summary()
+        self.assertIn("no alerts this run", summary.lower())
+        self.assertNotIn("primary_scan_status", summary)
+
+    def test_recovery_is_reported_when_opted_in(self):
+        self._write_watchlist(["test3.gov"])
+
+        latest = [
+            {
+                "initial_domain": "test3.gov",
+                "initial_base_domain": "test3.gov",
+                "live": "true",
+                "status_code": "200",
+                "primary_scan_status": "completed",
+                "scan_date": "2026-09-02T10:00:00Z",
+            }
+        ]
+        previous = [
+            dict(latest[0], primary_scan_status="timeout", scan_date="2026-09-01T10:00:00Z")
+        ]
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            return previous if "previous" in url else latest
+
+        code = self._run_main({"INPUT_REPORT_RECOVERIES": "true"}, fake_download)
+
+        self.assertEqual(code, 0)
+        summary = self._read_summary()
+        self.assertIn("`primary_scan_status`", summary)
+        self.assertIn("timeout", summary)
+        self.assertIn("completed", summary)
 
     def test_fail_on_alert_fails_when_existing_alert_is_noop(self):
         self._write_watchlist(["sub.test4.gov"])  # status_code 200 -> 503

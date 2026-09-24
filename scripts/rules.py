@@ -65,15 +65,44 @@ class Alert:
         return (self.domain, self.field)
 
 
+def _is_healthy_status_code(value: str) -> bool:
+    """A 2xx or 3xx status_code value."""
+    value = value.strip()
+    return len(value) == 3 and value.isdigit() and value[0] in ("2", "3")
+
+
+def _is_recovery(field: str, old: str, new: str) -> bool:
+    """
+    Determine whether a field transition is a good-direction ("recovery")
+    change.
+
+    This is a whitelist, not a heuristic: only the three fields the action
+    has real direction knowledge for can ever be a recovery. Any other
+    field - including a user-configured custom `fields` entry like
+    `https_enforced` or `hsts` - always returns False, since the action has
+    no basis for judging which direction is "good" for an arbitrary column.
+    """
+    if field == "live":
+        return new.strip().lower() == "true" and old.strip().lower() != "true"
+    if field == "status_code":
+        return _is_healthy_status_code(new) and not _is_healthy_status_code(old)
+    if field == "primary_scan_status":
+        return new.strip() == "completed" and old.strip() != "completed"
+    return False
+
+
 def _should_ignore_change(
     field: str,
     old: str,
     new: str,
     ignore_blank_transitions: bool,
     ignore_transitions: Set[Transition],
+    report_recoveries: bool,
 ) -> bool:
     """Determine whether a field value transition should be ignored."""
     if old == new:
+        return True
+    if not report_recoveries and _is_recovery(field, old, new):
         return True
     if ignore_blank_transitions and (not old or not new):
         return True
@@ -87,13 +116,16 @@ def _diff_domain_fields(
     fields: List[str],
     ignore_blank_transitions: bool,
     ignore_transitions: Set[Transition],
+    report_recoveries: bool,
 ) -> List[Alert]:
     """Find changed fields between previous and latest snapshots for a single domain."""
     alerts = []
     for field in fields:
         old = prev_row.get(field, "")
         new = latest_row.get(field, "")
-        if _should_ignore_change(field, old, new, ignore_blank_transitions, ignore_transitions):
+        if _should_ignore_change(
+            field, old, new, ignore_blank_transitions, ignore_transitions, report_recoveries
+        ):
             continue
         alerts.append(Alert(domain, field, old, new, "change"))
     return alerts
@@ -105,6 +137,7 @@ def evaluate_change_diff(
     fields: List[str],
     ignore_blank_transitions: bool = False,
     ignore_transitions: Optional[Set[Transition]] = None,
+    report_recoveries: bool = True,
 ) -> List[Alert]:
     """
     Detect changes between latest and previous snapshots.
@@ -115,6 +148,10 @@ def evaluate_change_diff(
         fields: List of field names to compare (e.g. ['live', 'status_code', 'primary_scan_status'])
         ignore_blank_transitions: If True, suppress value <-> '' transitions
         ignore_transitions: Set of (field, old, new) tuples to suppress
+        report_recoveries: If False, suppress good-direction transitions
+            (see _is_recovery). Defaults True here so this pure-logic
+            function suppresses nothing on its own; the action's own
+            default of False is applied by its caller.
 
     Returns:
         List of Alert objects
@@ -142,6 +179,7 @@ def evaluate_change_diff(
                 fields,
                 ignore_blank_transitions,
                 ignore_transitions,
+                report_recoveries,
             )
         )
 

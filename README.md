@@ -77,7 +77,7 @@ The action uses **fingerprinted filing** (no rolling comments, no auto-close - M
 - **First detection** → files a new issue
 - **Re-runs with identical findings while that issue is still open** → no-op (no duplicate issues)
 - **Different findings** (a new domain fails, or the set of failures changes) → files another issue, since the fingerprint no longer matches
-- **Condition clears** → reported in the step summary only; no issue is touched. Close the issue yourself once you've confirmed it's resolved.
+- **Condition clears** → by default, nothing is filed and nothing is reported - the run just says "No alerts this run". Set `report_recoveries: 'true'` to see good-direction transitions (note this files them as their own new issue; it does not close the original). Close the issue yourself once you've confirmed it's resolved.
 
 ## Configuring Your Watchlist
 
@@ -123,6 +123,7 @@ The action is configured via inputs in `.github/workflows/site-scanning-alerts.y
 | `alert_on_not_live` | `true` | Alert when monitored sites have live=false (state mode). Defaults on - a fully unreachable site has a blank status_code and a primary_scan_status outside the empty-by-default alert_on_scan_status set, so without this a hard-down site produces no state findings at all. Costs one finding per non-live site on every run it stays down |
 | `ignore_blank_transitions` | `false` | Suppress alerts for value -> blank and blank -> value transitions. When false, renders blanks as "(no data)" |
 | `ignore_transitions` | *(see below)* | Comma-separated list of specific transitions to suppress, format: field:old_value->new_value. Default suppresses transient status flapping |
+| `report_recoveries` | `false` | Include good-direction transitions in alerts (`live`→true, `status_code`→2xx/3xx, `primary_scan_status`→completed). Default suppresses them — a recovery would otherwise file its own new issue rather than closing the original. Custom fields (`https_enforced`, `hsts`, …) are never treated as recoveries |
 | `max_changes` | `25` | Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines |
 | `labels` | `site-scanning-alert` | Comma-separated list of labels to apply to created issues |
 | `issue_title` | `Possible website issues` | Title for alert issues |
@@ -145,7 +146,7 @@ primary_scan_status:aborted->timeout
 primary_scan_status:http2_error->timeout
 ```
 
-Transitions to/from `completed` are **not** suppressed — those are the highest-signal changes.
+Transitions **out of** `completed` (e.g. `completed`→`timeout`) are **not** suppressed — those are the highest-signal changes. Transitions **into** `completed` are recoveries and are suppressed by default; see `report_recoveries`.
 
 ## Understanding Your Alerts
 
@@ -169,7 +170,7 @@ For detailed remediation guidance on each scan status, see [GSA's Scan Statuses 
 
 Real-world data (2026-09-02 snapshot): **63% of `live` changes and 62% of `primary_scan_status` changes are artifacts** — value↔blank transitions or transient flapping (`completed`↔`timeout`). The action's defaults suppress the most common noise while preserving genuine signal.
 
-These percentages count *change-detection* findings only, measured under the defaults in force at the time - they have not been recomputed since. `alert_on_not_live` now defaults to `true`, which adds a state-mode finding for every non-live site on every run; that stream isn't reflected in the numbers below.
+These percentages count *change-detection* findings only, measured under the defaults in force at the time - they have not been recomputed since. Two defaults have changed since: `alert_on_not_live` now defaults to `true`, which adds a state-mode finding for every non-live site on every run; and `report_recoveries` now defaults to `false`, which drops good-direction transitions from the change-detection counts below. Neither stream is reflected in the numbers.
 
 ### Noise by the Numbers
 
@@ -200,7 +201,9 @@ From a typical day's diff of 29,668 sites:
 ignore_transitions: 'primary_scan_status:completed->timeout,primary_scan_status:timeout->completed'
 ```
 
-**Blank transitions (`live: true -> (no data)`):** These often mean "the scanner couldn't reach the site that day" — a genuine signal. Suppressing them (`ignore_blank_transitions: true`) will hide real but intermittent problems.
+The `timeout->completed` half of that example is already covered by the `report_recoveries` default - you only need it explicitly if you've set `report_recoveries: 'true'`.
+
+**Blank transitions (`live: true -> (no data)`):** These often mean "the scanner couldn't reach the site that day" — a genuine signal. Suppressing them (`ignore_blank_transitions: true`) will hide real but intermittent problems. Note that a blank-to-healthy transition (e.g. `'' -> 200`, `'' -> completed`) is classified as a recovery and suppressed by the `report_recoveries` default regardless of this setting.
 
 ## Troubleshooting
 
@@ -255,7 +258,7 @@ ignore_transitions: 'primary_scan_status:completed->timeout,primary_scan_status:
 
 Edit `.github/workflows/site-scanning-alerts.yml` to change:
 - **Schedule:** The `cron:` line (default: daily at 15:30 UTC)
-- **Noise settings:** `ignore_blank_transitions`, `max_changes`, `ignore_transitions`
+- **Noise settings:** `ignore_blank_transitions`, `max_changes`, `ignore_transitions`, `report_recoveries`
 - **What to watch:** `fields`, `alert_on_status_codes`, `alert_on_not_live`
 - **Issue appearance:** `labels`, `issue_title`
 
@@ -359,7 +362,7 @@ Consumers reference `GSA/site-scanning-alert-template@v1` and get the latest v1.
 
 - **CSV-only:** No JSON snapshot support (JSON is 2.5× larger with zero benefit for diffing)
 - **Single repo issues:** Can't file issues cross-repo (by design — simpler token model)
-- **No auto-close, no rolling comments:** Each distinct set of findings files its own issue (deduped only against an already-open issue with the identical fingerprint); recovery is reported in the step summary, not on the issue. Triage and closing are manual. This is an intentional MVP tradeoff - a bit more issue-tab noise in exchange for a much simpler, harder-to-break filing path. Revisit if the noise becomes a real problem.
+- **No auto-close, no rolling comments:** Each distinct set of findings files its own issue (deduped only against an already-open issue with the identical fingerprint). By default, a recovery is not reported anywhere; with `report_recoveries: 'true'` it files its own new issue rather than closing the original. Triage and closing are manual. This is an intentional MVP tradeoff - a bit more issue-tab noise in exchange for a much simpler, harder-to-break filing path. Revisit if the noise becomes a real problem.
 - **No historical trending:** Each alert is independent; no aggregation of "site X has been flapping for 7 days"
 - **API unsupported:** Site Scanning's REST API can't filter by `status_code` or `primary_scan_status`, and DEMO_KEY rate-limits at ~6 requests. CSV diff is the only viable approach.
 
