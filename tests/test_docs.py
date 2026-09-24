@@ -152,6 +152,11 @@ class TestDocumentation(unittest.TestCase):
         self.assertRegex(quickstart_yaml, r"(?m)^  group: site-scanning-alerts-")
         self.assertRegex(quickstart_yaml, r"(?m)^  cancel-in-progress: false$")
 
+        # A hung run must not sit indefinitely: with cancel-in-progress:
+        # false (above), a stuck job parks the whole concurrency group and
+        # every subsequent scheduled run queues behind it.
+        self.assertIn("timeout-minutes:", quickstart_yaml)
+
 
 class TestWorkflowConcurrency(unittest.TestCase):
     """
@@ -185,6 +190,29 @@ class TestWorkflowConcurrency(unittest.TestCase):
         concurrency_idx = self.workflow.index("concurrency:")
         jobs_idx = self.workflow.index("\njobs:")
         self.assertLess(concurrency_idx, jobs_idx)
+
+    def test_alert_job_has_timeout(self):
+        """
+        cancel-in-progress: false means a hung run parks the concurrency
+        group - every subsequent scheduled run queues behind it, a silent
+        multi-day monitoring gap. timeout-minutes is what makes that
+        design safe.
+        """
+        self.assertIn("timeout-minutes:", self.workflow)
+
+
+class TestWorkflowTimeouts(unittest.TestCase):
+    """Regression: a hung test/lint job has no other backstop against
+    eating the org's Actions minutes."""
+
+    def setUp(self):
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        workflow_path = os.path.join(repo_root, ".github", "workflows", "test.yml")
+        with open(workflow_path, "r") as f:
+            self.workflow = f.read()
+
+    def test_both_jobs_have_a_timeout(self):
+        self.assertEqual(self.workflow.count("timeout-minutes:"), 2)
 
 
 class TestExternalLinks(unittest.TestCase):

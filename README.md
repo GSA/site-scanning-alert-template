@@ -39,6 +39,7 @@ This repo monitors the sites listed in `watchlist.txt` and checks for changes or
    jobs:
      check-alerts:
        runs-on: ubuntu-latest
+       timeout-minutes: 30
        steps:
          - uses: actions/checkout@v4
          - uses: GSA/site-scanning-alert-template@v1
@@ -215,6 +216,7 @@ ignore_transitions: 'primary_scan_status:completed->timeout,primary_scan_status:
 | "Snapshot is stale" message | Upstream scanning engine hasn't run | The action reports staleness instead of flooding with change alerts, and files a "data is stale" issue. Check the [Site Scanning engine's workflows](https://github.com/GSA/site-scanning-engine/actions). Once fresh data returns, close the staleness issue manually - the action doesn't auto-comment or auto-close it. |
 | Nothing since \<date\> but sites are fine | Snapshot rotation cadence | Snapshots rotate once daily at 15:00 UTC. The action runs at 15:30 UTC to catch the fresh data. |
 | A state alert for every non-live site, every single run | `alert_on_not_live` defaults to `true` | Deliberate - a fully unreachable site produces no other finding, so with this off `mode: both` goes silent after the day-one change alert. The cost is a standing finding for as long as the site is down. Remove the domain from the watchlist if it's known-dead, or set `alert_on_not_live: 'false'` to go back to change-only detection for it |
+| No runs at all since ~60 days ago; Actions tab shows the schedule disabled | GitHub disables `schedule:` triggers after 60 days of no commit activity in the repo | A monitoring-only repo can easily go 60 days with no commits, and the disable is silent - the workflow simply stops firing. Re-enable it from Actions → "Site Scanning Alerts" → "Enable workflow", and either push any commit or run `workflow_dispatch` periodically to keep the schedule alive. Check this first whenever alerts stop arriving with no error to show for it |
 | Empty watchlist warning | `watchlist.txt` has only comments/blanks | Add at least one domain (uncomment an example or add your own) |
 | "No alerts this run" | No findings this run | Expected when everything's healthy. In `mode: change`, this can also mean "nothing changed since yesterday" - which is not the same as "recovered" for a sustained outage. Switch to `mode: state` or `mode: both` if you need the action to actively confirm current health rather than only detect transitions. |
 | "Invalid `mode`" error, workflow fails | `mode` input misspelled or unsupported | `mode` must be exactly `change`, `state`, or `both`. Fix the typo in the workflow file. |
