@@ -107,9 +107,9 @@ def _env(name: str, default: str = "") -> str:
     return os.getenv(f"INPUT_{name.upper()}", default)
 
 
-def _env_flag(name: str) -> bool:
-    """Read a boolean `INPUT_*` action input (default false)."""
-    return _env(name, "false").lower() == "true"
+def _env_flag(name: str, default: str = "false") -> bool:
+    """Read a boolean `INPUT_*` action input."""
+    return _env(name, default).lower() == "true"
 
 
 def read_config() -> Config:
@@ -120,7 +120,14 @@ def read_config() -> Config:
         fields=parse_csv_list(_env("fields", "live,status_code,primary_scan_status")),
         alert_on_status_codes=set(parse_csv_list(_env("alert_on_status_codes", "500,502,503,504"))),
         alert_on_scan_status=set(parse_csv_list(_env("alert_on_scan_status"))),
-        alert_on_not_live=_env_flag("alert_on_not_live"),
+        # Defaults true: a fully unreachable site has live=false, a blank
+        # status_code, and a primary_scan_status outside the empty-by-default
+        # alert_on_scan_status set - with this off, mode: both produces zero
+        # state alerts for the worst possible failure. Must agree with
+        # action.yml's `alert_on_not_live` default (_env_flag has no implicit
+        # default), since the local dry-run recipe in AGENTS.md invokes this
+        # script directly, bypassing action.yml entirely.
+        alert_on_not_live=_env_flag("alert_on_not_live", "true"),
         ignore_blank_transitions=_env_flag("ignore_blank_transitions"),
         ignore_transitions_str=_env("ignore_transitions"),
         max_changes=int(_env("max_changes", "25")),

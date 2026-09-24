@@ -11,6 +11,7 @@ assert on GITHUB_STEP_SUMMARY output.
 
 import csv
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import site_scanning_alerts as ssa
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+ACTION_YML = os.path.join(os.path.dirname(__file__), "..", "action.yml")
 
 
 def load_fixture_rows(name):
@@ -136,6 +138,86 @@ class TestStalledRotationStillRunsStateChecks(SiteScanningAlertsTestCase):
         self.assertNotIn("alerts", calls)
         summary = self._read_summary()
         self.assertIn("No new information this run", summary)
+
+
+class TestNotLiveAlertsByDefault(SiteScanningAlertsTestCase):
+    """
+    Regression: with the shipped defaults, a fully unreachable site (live=false,
+    blank status_code, a primary_scan_status outside the empty-by-default
+    alert_on_scan_status set) produced zero state alerts, so mode: both went
+    silent after the day-1 change alert. dedupe_alerts collapses a state alert
+    into a same-field change alert, so this is only observable on day 2+ of an
+    outage - simulated here the same way TestStalledRotationStillRunsStateChecks
+    does, by returning identical rows for both snapshot URLs.
+    """
+
+    DOWN_ROW = {
+        "initial_domain": "down.gov",
+        "initial_base_domain": "down.gov",
+        "live": "false",
+        "status_code": "",
+        "primary_scan_status": "connection_refused",
+        "scan_date": "2026-09-02T10:00:00Z",
+    }
+
+    def test_sustained_not_live_site_alerts_without_pinning_the_input(self):
+        self._write_watchlist(["down.gov"])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            return [self.DOWN_ROW]
+
+        code = self._run_main({}, fake_download)
+
+        self.assertEqual(code, 0)
+        summary = self._read_summary()
+        self.assertIn("down.gov", summary)
+        self.assertIn("`live`", summary)
+
+    def test_alert_on_not_live_false_still_opts_out(self):
+        self._write_watchlist(["down.gov"])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            return [self.DOWN_ROW]
+
+        code = self._run_main({"INPUT_ALERT_ON_NOT_LIVE": "false"}, fake_download)
+
+        self.assertEqual(code, 0)
+        summary = self._read_summary()
+        self.assertIn("No new information this run", summary)
+
+
+class TestBooleanDefaultsMatchActionYml(unittest.TestCase):
+    """
+    Regression: read_config()'s boolean fields must agree with action.yml's
+    defaults. _env_flag previously hardcoded "false" regardless of what the
+    caller wanted, so read_config() and action.yml could silently disagree -
+    this pins every known boolean input against a real parse of action.yml
+    so a future one can't drift the same way.
+    """
+
+    # Maps an action.yml input name to the Config field it feeds.
+    BOOLEAN_INPUTS = {
+        "alert_on_not_live": "alert_on_not_live",
+        "ignore_blank_transitions": "ignore_blank_transitions",
+        "fail_on_alert": "fail_on_alert",
+        "dry_run": "dry_run",
+    }
+
+    def _action_yml_default(self, input_name):
+        with open(ACTION_YML) as f:
+            text = f.read()
+        match = re.search(rf"\n  {re.escape(input_name)}:\n(?:.*\n)*?    default: '(\w+)'", text)
+        self.assertIsNotNone(match, f"Could not find a default for {input_name} in action.yml")
+        return match.group(1)
+
+    def test_env_flag_defaults_match_action_yml(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = ssa.read_config()
+
+        for input_name, field_name in self.BOOLEAN_INPUTS.items():
+            with self.subTest(input_name=input_name):
+                expected = self._action_yml_default(input_name) == "true"
+                self.assertEqual(getattr(config, field_name), expected)
 
 
 class TestStalenessFailOnAlert(SiteScanningAlertsTestCase):
