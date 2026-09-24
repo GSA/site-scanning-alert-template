@@ -493,6 +493,86 @@ class TestInvalidModeRejected(SiteScanningAlertsTestCase):
                 self.assertEqual(cm.exception.code, 0)
 
 
+class TestInvalidIntegerInputsRejected(SiteScanningAlertsTestCase):
+    """
+    Regression: max_changes and max_snapshot_age_days were coerced with a
+    bare int(), so a bad value raised ValueError out of read_config() -
+    before run()'s guards even get a chance to run - and main()'s generic
+    handler rendered that as "UNEXPECTED ERROR" plus a full traceback in
+    the step summary, instead of a clean, targeted message like the
+    existing `mode` guard produces.
+    """
+
+    def _assert_clean_rejection(self, code, summary, name, bad_value):
+        self.assertEqual(code, 1)
+        self.assertIn(name, summary)
+        self.assertIn(bad_value, summary)
+        self.assertNotIn("Unexpected Error", summary)
+        self.assertNotIn("Traceback", summary)
+
+    def test_non_integer_max_changes_fails_cleanly_before_any_download(self):
+        self._write_watchlist(["test1.gov"])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            raise AssertionError("download_snapshot must not be called for a bad max_changes")
+
+        code = self._run_main({"INPUT_MAX_CHANGES": "twenty"}, fake_download)
+
+        summary = self._read_summary()
+        self._assert_clean_rejection(code, summary, "max_changes", "twenty")
+
+    def test_zero_max_changes_is_rejected(self):
+        self._write_watchlist(["test1.gov"])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            raise AssertionError("download_snapshot must not be called for a bad max_changes")
+
+        code = self._run_main({"INPUT_MAX_CHANGES": "0"}, fake_download)
+
+        summary = self._read_summary()
+        self._assert_clean_rejection(code, summary, "max_changes", "0")
+
+    def test_negative_max_snapshot_age_days_fails_cleanly(self):
+        self._write_watchlist(["test1.gov"])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            raise AssertionError(
+                "download_snapshot must not be called for a bad max_snapshot_age_days"
+            )
+
+        code = self._run_main({"INPUT_MAX_SNAPSHOT_AGE_DAYS": "-1"}, fake_download)
+
+        summary = self._read_summary()
+        self._assert_clean_rejection(code, summary, "max_snapshot_age_days", "-1")
+
+    def test_non_integer_max_snapshot_age_days_fails_cleanly(self):
+        self._write_watchlist(["test1.gov"])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            raise AssertionError(
+                "download_snapshot must not be called for a bad max_snapshot_age_days"
+            )
+
+        code = self._run_main({"INPUT_MAX_SNAPSHOT_AGE_DAYS": ""}, fake_download)
+
+        summary = self._read_summary()
+        self._assert_clean_rejection(code, summary, "max_snapshot_age_days", "")
+
+    def test_valid_integers_still_pass_through(self):
+        self._write_watchlist(["test1.gov"])
+
+        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
+            if "previous" in url:
+                return PREVIOUS_ROWS
+            return LATEST_ROWS
+
+        code = self._run_main(
+            {"INPUT_MAX_CHANGES": "100", "INPUT_MAX_SNAPSHOT_AGE_DAYS": "0"}, fake_download
+        )
+
+        self.assertEqual(code, 0)
+
+
 class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):
     """
     With no rolling comments, there's no "clear" action to file - zero

@@ -112,6 +112,28 @@ def _env_flag(name: str, default: str = "false") -> bool:
     return _env(name, default).lower() == "true"
 
 
+def _env_int(name: str, default: str, minimum: int = 0) -> int:
+    """
+    Read an integer `INPUT_*` action input, hard-failing on a bad value.
+
+    Validated here rather than in a run()-level guard: a bare int() raises
+    ValueError, and main()'s generic exception handler renders that as
+    "UNEXPECTED ERROR" plus a full traceback in the step summary instead of
+    a targeted message. read_config() runs before run(), so this fires
+    before any network I/O by construction - same guarantee as the mode
+    guard, just earlier. Calls the module-level _fail(), defined later in
+    this file; that's fine, since name resolution happens at call time.
+    """
+    raw = _env(name, default).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        _fail(f"❌ **Invalid `{name}`: `{raw}`**\n\nExpected a whole number ≥ {minimum}.")
+    if value < minimum:
+        _fail(f"❌ **Invalid `{name}`: `{raw}`**\n\nExpected a whole number ≥ {minimum}.")
+    return value
+
+
 def read_config() -> Config:
     """Read inputs from environment (set by action.yml)."""
     return Config(
@@ -130,7 +152,7 @@ def read_config() -> Config:
         alert_on_not_live=_env_flag("alert_on_not_live", "true"),
         ignore_blank_transitions=_env_flag("ignore_blank_transitions"),
         ignore_transitions_str=_env("ignore_transitions"),
-        max_changes=int(_env("max_changes", "25")),
+        max_changes=_env_int("max_changes", "25", minimum=1),
         labels=parse_csv_list(_env("labels", "site-scanning-alert")),
         issue_title=_env("issue_title", "Possible website issues"),
         snapshot_url=_env(
@@ -141,7 +163,7 @@ def read_config() -> Config:
             "previous_snapshot_url",
             "https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv",
         ),
-        max_snapshot_age_days=int(_env("max_snapshot_age_days", "3")),
+        max_snapshot_age_days=_env_int("max_snapshot_age_days", "3"),
         token=_env("token"),
         fail_on_alert=_env_flag("fail_on_alert"),
         dry_run=_env_flag("dry_run"),
