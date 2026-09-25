@@ -116,21 +116,18 @@ def _env_int(name: str, default: str, minimum: int = 0) -> int:
     """
     Read an integer `INPUT_*` action input, hard-failing on a bad value.
 
-    Validated here rather than in a run()-level guard: a bare int() raises
-    ValueError, and main()'s generic exception handler renders that as
-    "UNEXPECTED ERROR" plus a full traceback in the step summary instead of
-    a targeted message. read_config() runs before run(), so this fires
-    before any network I/O by construction - same guarantee as the mode
-    guard, just earlier. Calls the module-level _fail(), defined later in
-    this file; that's fine, since name resolution happens at call time.
+    main() calls read_config() outside its try block, so a bare int() would
+    escape as a raw traceback with nothing in the step summary. Failing here
+    also runs before any network I/O.
     """
     raw = _env(name, default).strip()
     try:
-        value = int(raw)
+        value: Optional[int] = int(raw)
     except ValueError:
-        _fail(f"❌ **Invalid `{name}`: `{raw}`**\n\nExpected a whole number ≥ {minimum}.")
-    if value < minimum:
-        _fail(f"❌ **Invalid `{name}`: `{raw}`**\n\nExpected a whole number ≥ {minimum}.")
+        value = None
+    if value is None or value < minimum:
+        shown = f"`{raw}`" if raw else "(empty)"
+        _fail(f"❌ **Invalid `{name}`: {shown}**\n\nExpected a whole number ≥ {minimum}.")
     return value
 
 

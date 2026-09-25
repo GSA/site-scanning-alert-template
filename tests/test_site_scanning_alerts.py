@@ -496,67 +496,51 @@ class TestInvalidModeRejected(SiteScanningAlertsTestCase):
 class TestInvalidIntegerInputsRejected(SiteScanningAlertsTestCase):
     """
     Regression: max_changes and max_snapshot_age_days were coerced with a
-    bare int(), so a bad value raised ValueError out of read_config() -
-    before run()'s guards even get a chance to run - and main()'s generic
-    handler rendered that as "UNEXPECTED ERROR" plus a full traceback in
-    the step summary, instead of a clean, targeted message like the
-    existing `mode` guard produces.
+    bare int() in read_config(), which main() calls outside its try block.
+    A bad value escaped as a raw ValueError traceback on stderr, with nothing
+    written to the step summary.
     """
 
-    def _assert_clean_rejection(self, code, summary, name, bad_value):
-        self.assertEqual(code, 1)
-        self.assertIn(name, summary)
-        self.assertIn(bad_value, summary)
-        self.assertNotIn("Unexpected Error", summary)
-        self.assertNotIn("Traceback", summary)
-
-    def test_non_integer_max_changes_fails_cleanly_before_any_download(self):
+    def _assert_rejected_before_download(self, env_name, bad_value, expected):
         self._write_watchlist(["test1.gov"])
 
         def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
-            raise AssertionError("download_snapshot must not be called for a bad max_changes")
+            raise AssertionError(f"download_snapshot must not be called for a bad {env_name}")
 
-        code = self._run_main({"INPUT_MAX_CHANGES": "twenty"}, fake_download)
+        code = self._run_main({env_name: bad_value}, fake_download)
 
-        summary = self._read_summary()
-        self._assert_clean_rejection(code, summary, "max_changes", "twenty")
+        self.assertEqual(code, 1)
+        self.assertIn(expected, self._read_summary())
+
+    def test_non_integer_max_changes_is_rejected(self):
+        self._assert_rejected_before_download(
+            "INPUT_MAX_CHANGES",
+            "twenty",
+            "Invalid `max_changes`: `twenty`",
+        )
 
     def test_zero_max_changes_is_rejected(self):
-        self._write_watchlist(["test1.gov"])
+        self._assert_rejected_before_download(
+            "INPUT_MAX_CHANGES",
+            "0",
+            "Invalid `max_changes`: `0`",
+        )
 
-        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
-            raise AssertionError("download_snapshot must not be called for a bad max_changes")
+    def test_negative_max_snapshot_age_days_is_rejected(self):
+        self._assert_rejected_before_download(
+            "INPUT_MAX_SNAPSHOT_AGE_DAYS",
+            "-1",
+            "Invalid `max_snapshot_age_days`: `-1`",
+        )
 
-        code = self._run_main({"INPUT_MAX_CHANGES": "0"}, fake_download)
-
-        summary = self._read_summary()
-        self._assert_clean_rejection(code, summary, "max_changes", "0")
-
-    def test_negative_max_snapshot_age_days_fails_cleanly(self):
-        self._write_watchlist(["test1.gov"])
-
-        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
-            raise AssertionError(
-                "download_snapshot must not be called for a bad max_snapshot_age_days"
-            )
-
-        code = self._run_main({"INPUT_MAX_SNAPSHOT_AGE_DAYS": "-1"}, fake_download)
-
-        summary = self._read_summary()
-        self._assert_clean_rejection(code, summary, "max_snapshot_age_days", "-1")
-
-    def test_non_integer_max_snapshot_age_days_fails_cleanly(self):
-        self._write_watchlist(["test1.gov"])
-
-        def fake_download(url, wanted_columns=None, optional_columns=None, **kwargs):
-            raise AssertionError(
-                "download_snapshot must not be called for a bad max_snapshot_age_days"
-            )
-
-        code = self._run_main({"INPUT_MAX_SNAPSHOT_AGE_DAYS": ""}, fake_download)
-
-        summary = self._read_summary()
-        self._assert_clean_rejection(code, summary, "max_snapshot_age_days", "")
+    def test_empty_max_snapshot_age_days_is_rejected(self):
+        # An empty code span renders as nothing in Markdown, so the message
+        # names the empty value explicitly.
+        self._assert_rejected_before_download(
+            "INPUT_MAX_SNAPSHOT_AGE_DAYS",
+            "",
+            "Invalid `max_snapshot_age_days`: (empty)",
+        )
 
     def test_valid_integers_still_pass_through(self):
         self._write_watchlist(["test1.gov"])
@@ -570,7 +554,10 @@ class TestInvalidIntegerInputsRejected(SiteScanningAlertsTestCase):
             {"INPUT_MAX_CHANGES": "100", "INPUT_MAX_SNAPSHOT_AGE_DAYS": "0"}, fake_download
         )
 
+        # The fixtures are older than 0 days, so reaching the stale-snapshot
+        # exit proves the value was parsed and used, not just not rejected.
         self.assertEqual(code, 0)
+        self.assertIn("Snapshot is stale", self._read_summary())
 
 
 class TestNoAlertsSkipsFiling(SiteScanningAlertsTestCase):

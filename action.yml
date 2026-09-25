@@ -47,7 +47,7 @@ inputs:
     default: 'primary_scan_status:timeout->execution_context_destroyed,primary_scan_status:timeout->connection_reset,primary_scan_status:timeout->empty_response,primary_scan_status:execution_context_destroyed->timeout,primary_scan_status:connection_reset->timeout,primary_scan_status:empty_response->timeout,primary_scan_status:aborted->timeout,primary_scan_status:http2_error->timeout'
   
   max_changes:
-    description: 'Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines'
+    description: 'Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines. Must be a whole number >= 1.'
     required: false
     default: '25'
   
@@ -72,7 +72,7 @@ inputs:
     default: 'https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv'
   
   max_snapshot_age_days:
-    description: 'Maximum age of the latest snapshot before reporting staleness instead of changes'
+    description: 'Maximum age of the latest snapshot before reporting staleness instead of changes. Must be a whole number >= 0 (0 = under 24 hours old).'
     required: false
     default: '3'
   
