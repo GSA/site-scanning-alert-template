@@ -52,7 +52,7 @@ inputs:
     default: 'false'
 
   max_changes:
-    description: 'Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines'
+    description: 'Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines. Must be a whole number >= 1.'
     required: false
     default: '25'
   
@@ -77,7 +77,7 @@ inputs:
     default: 'https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv'
   
   max_snapshot_age_days:
-    description: 'Maximum age of the latest snapshot before reporting staleness instead of changes'
+    description: 'Maximum age of the latest snapshot before reporting staleness instead of changes. Must be a whole number >= 0 (0 = under 24 hours old).'
     required: false
     default: '3'
   

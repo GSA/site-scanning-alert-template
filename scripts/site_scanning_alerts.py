@@ -113,6 +113,25 @@ def _env_flag(name: str, default: str = "false") -> bool:
     return _env(name, default).lower() == "true"
 
 
+def _env_int(name: str, default: str, minimum: int = 0) -> int:
+    """
+    Read an integer `INPUT_*` action input, hard-failing on a bad value.
+
+    main() calls read_config() outside its try block, so a bare int() would
+    escape as a raw traceback with nothing in the step summary. Failing here
+    also runs before any network I/O.
+    """
+    raw = _env(name, default).strip()
+    try:
+        value: Optional[int] = int(raw)
+    except ValueError:
+        value = None
+    if value is None or value < minimum:
+        shown = f"`{raw}`" if raw else "(empty)"
+        _fail(f"❌ **Invalid `{name}`: {shown}**\n\nExpected a whole number ≥ {minimum}.")
+    return value
+
+
 def read_config() -> Config:
     """Read inputs from environment (set by action.yml)."""
     return Config(
@@ -132,7 +151,7 @@ def read_config() -> Config:
         ignore_blank_transitions=_env_flag("ignore_blank_transitions"),
         ignore_transitions_str=_env("ignore_transitions"),
         report_recoveries=_env_flag("report_recoveries", "false"),
-        max_changes=int(_env("max_changes", "25")),
+        max_changes=_env_int("max_changes", "25", minimum=1),
         labels=parse_csv_list(_env("labels", "site-scanning-alert")),
         issue_title=_env("issue_title", "Possible website issues"),
         snapshot_url=_env(
@@ -143,7 +162,7 @@ def read_config() -> Config:
             "previous_snapshot_url",
             "https://api.gsa.gov/technology/site-scanning/data/site-scanning-previous.csv",
         ),
-        max_snapshot_age_days=int(_env("max_snapshot_age_days", "3")),
+        max_snapshot_age_days=_env_int("max_snapshot_age_days", "3"),
         token=_env("token"),
         fail_on_alert=_env_flag("fail_on_alert"),
         dry_run=_env_flag("dry_run"),

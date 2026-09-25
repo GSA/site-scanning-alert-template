@@ -124,12 +124,12 @@ The action is configured via inputs in `.github/workflows/site-scanning-alerts.y
 | `ignore_blank_transitions` | `false` | Suppress alerts for value -> blank and blank -> value transitions. When false, renders blanks as "(no data)" |
 | `ignore_transitions` | *(see below)* | Comma-separated list of specific transitions to suppress, format: field:old_value->new_value. Default suppresses transient status flapping |
 | `report_recoveries` | `false` | Include good-direction transitions in alerts (`live`→true, `status_code`→2xx, `primary_scan_status`→completed). Default suppresses them — a recovery would otherwise file its own new issue rather than closing the original. Custom fields (`https_enforced`, `hsts`, …) are never treated as recoveries |
-| `max_changes` | `25` | Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines |
+| `max_changes` | `25` | Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines. Must be a whole number ≥ 1 |
 | `labels` | `site-scanning-alert` | Comma-separated list of labels to apply to created issues |
 | `issue_title` | `Possible website issues` | Title for alert issues |
 | `snapshot_url` | `https://api.gsa.gov/.../site-scanning-latest.csv` | URL of the latest Site Scanning snapshot CSV. Override for testing only |
 | `previous_snapshot_url` | `https://api.gsa.gov/.../site-scanning-previous.csv` | URL of the previous Site Scanning snapshot CSV (for change detection). Override for testing only |
-| `max_snapshot_age_days` | `3` | Maximum age of the latest snapshot before reporting staleness instead of changes |
+| `max_snapshot_age_days` | `3` | Maximum age of the latest snapshot before reporting staleness instead of changes. Must be a whole number ≥ 0 (`0` = under 24 hours old) |
 | `token` | `${{ github.token }}` | GitHub token for creating issues. Defaults to github.token (requires permissions.issues: write) |
 | `fail_on_alert` | `false` | Whether to fail the workflow when an alert is fired |
 | `dry_run` | `false` | When true, render alert to step summary instead of creating an issue |
