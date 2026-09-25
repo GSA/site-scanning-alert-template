@@ -13,6 +13,8 @@ lifecycle; revisit if the noise becomes a real problem.
 
 import hashlib
 import json
+import math
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +25,57 @@ from typing import Dict, List, Optional
 MAX_ISSUE_PAGES = 5
 
 MARKER_PREFIX = "<!-- site-scanning-alert:"
+
+# Retry shape for _request, modeled on snapshot._fetch.
+API_TIMEOUT_SECONDS = 30
+API_RETRY_COUNT = 3
+API_RETRY_DELAY = 2.0
+MAX_RETRY_AFTER_SECONDS = 60
+
+SECONDARY_RATE_LIMIT_MARKERS = ("secondary rate limit", "abuse detection")
+
+
+def _is_rate_limited(code: int, body: str) -> bool:
+    """
+    A 429, or a 403 from GitHub's secondary rate limit / abuse detection.
+    A plain permissions 403 will never succeed on retry.
+    """
+    if code == 429:
+        return True
+    lowered = body.lower()
+    return code == 403 and any(marker in lowered for marker in SECONDARY_RATE_LIMIT_MARKERS)
+
+
+def _is_retryable_status(method: str, code: int, body: str) -> bool:
+    """
+    Rate limits are rejected before GitHub does any work, so they're safe to
+    resend for any verb. A 5xx can arrive after a write was already applied,
+    so only an idempotent GET retries it.
+    """
+    if _is_rate_limited(code, body):
+        return True
+    return method == "GET" and 500 <= code < 600
+
+
+def _retry_after_seconds(headers, fallback: float) -> float:
+    """
+    Read a Retry-After header if present, capped so a hostile or
+    misconfigured header can't park the job for hours.
+
+    Only the integer-seconds form is honored; the HTTP-date form falls
+    back to the caller's own backoff delay rather than parsing a date.
+    """
+    raw = headers.get("Retry-After") if headers else None
+    if raw is None:
+        return fallback
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return fallback
+    # A negative value would make time.sleep raise ValueError.
+    if not math.isfinite(seconds) or seconds < 0:
+        return fallback
+    return min(seconds, MAX_RETRY_AFTER_SECONDS)
 
 
 def _find_issue_with_marker(issues: List[Dict], marker: str) -> Optional[Dict]:
@@ -68,27 +121,53 @@ class IssueClient:
         path: str,
         data: Optional[Dict] = None,
     ) -> Dict:
-        """Make authenticated GitHub API request."""
+        """
+        Make an authenticated GitHub API request, retrying transient
+        failures.
+
+        A POST is retried only on a rate limit. A 5xx or network error on a
+        POST may mean the write already happened server-side, and retrying
+        `POST /issues` would file a duplicate issue.
+        """
         url = f"{self.base_url}{path}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
         }
-
         req_data = json.dumps(data).encode() if data else None
-        req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
+        idempotent = method == "GET"
 
-        try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                return json.loads(response.read().decode())
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode() if e.fp else ""
-            raise RuntimeError(
-                f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}"
-            ) from e
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"GitHub API {method} {path} failed: {e.reason}") from e
+        last_error = RuntimeError(f"GitHub API {method} {path} failed: no attempts made")
+        for attempt in range(API_RETRY_COUNT):
+            req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
+            sleep_for = API_RETRY_DELAY * (attempt + 1)
+
+            try:
+                with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as response:
+                    return json.loads(response.read().decode())
+            except urllib.error.HTTPError as e:
+                # HTTPError subclasses URLError, so this clause must come first.
+                error_body = e.read().decode() if e.fp else ""
+                last_error = RuntimeError(
+                    f"GitHub API {method} {path} failed: HTTP {e.code} - {error_body}"
+                )
+                if not _is_retryable_status(method, e.code, error_body):
+                    raise last_error from e
+                sleep_for = _retry_after_seconds(e.headers, sleep_for)
+            except (urllib.error.URLError, TimeoutError) as e:
+                # A bare TimeoutError (not wrapped in URLError) is what
+                # urlopen(timeout=...) raises on a read timeout.
+                last_error = RuntimeError(
+                    f"GitHub API {method} {path} failed: {getattr(e, 'reason', e)}"
+                )
+                if not idempotent:
+                    raise last_error from e
+
+            if attempt < API_RETRY_COUNT - 1:
+                time.sleep(sleep_for)
+
+        raise last_error
 
     def ensure_label(self, label: str, color: str = "0366d6", description: str = "") -> None:
         """Create label if it doesn't exist (idempotent)."""

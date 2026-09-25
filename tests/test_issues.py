@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Tests for issues.py"""
 
+import io
 import os
 import sys
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
@@ -15,6 +17,29 @@ from issues import (
     compute_fingerprint,
     file_alert,
 )
+
+
+class FakeJsonResponse:
+    """Minimal stand-in for the context manager urllib.request.urlopen returns."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _http_error(code, body=b"", headers=None):
+    """Build a real HTTPError, so .code/.read()/.headers all behave like the real thing."""
+    return urllib.error.HTTPError(
+        "https://api.github.com/x", code, "reason", headers or {}, io.BytesIO(body)
+    )
 
 
 class TestFingerprinting(unittest.TestCase):
@@ -161,6 +186,246 @@ class TestIssueClientMock(unittest.TestCase):
         self.assertEqual(method, "GET")
         self.assertNotIn(" ", path)
         self.assertIn("needs%20encoding", path)
+
+
+class TestRequestRetries(unittest.TestCase):
+    """
+    Retry behavior of IssueClient._request. Deliberately asymmetric: GET
+    retries 5xx, rate limits, and network errors, but POST retries only
+    rate limits. A 5xx or network error on POST may arrive after the issue
+    was already created server-side, and retrying it risks a duplicate.
+    """
+
+    def test_get_retries_on_500_then_succeeds(self):
+        client = IssueClient("owner/repo", "token")
+        ok = FakeJsonResponse(b'{"ok": true}')
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=[_http_error(500), ok]),
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            result = client._request("GET", "/issues")
+
+        self.assertEqual(result, {"ok": True})
+        mock_sleep.assert_called_once()
+
+    def test_get_retries_on_429_then_succeeds(self):
+        client = IssueClient("owner/repo", "token")
+        ok = FakeJsonResponse(b'{"ok": true}')
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=[_http_error(429), ok]),
+            patch("issues.time.sleep"),
+        ):
+            result = client._request("GET", "/issues")
+
+        self.assertEqual(result, {"ok": True})
+
+    def test_get_retries_on_secondary_rate_limit_403(self):
+        client = IssueClient("owner/repo", "token")
+        ok = FakeJsonResponse(b'{"ok": true}')
+        secondary_403 = _http_error(403, body=b"You have exceeded a secondary rate limit")
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=[secondary_403, ok]),
+            patch("issues.time.sleep"),
+        ):
+            result = client._request("GET", "/issues")
+
+        self.assertEqual(result, {"ok": True})
+
+    def test_plain_403_is_not_retried(self):
+        """A permissions 403 will never succeed on retry - fail fast."""
+        client = IssueClient("owner/repo", "token")
+        plain_403 = _http_error(403, body=b"Resource not accessible by integration")
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=plain_403) as mock_urlopen,
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            with self.assertRaises(RuntimeError):
+                client._request("GET", "/issues")
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_404_is_not_retried_and_keeps_http_404_substring(self):
+        """
+        ensure_label sniffs "HTTP 404" out of the raised message to decide
+        a label doesn't exist yet - that substring must survive.
+        """
+        client = IssueClient("owner/repo", "token")
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=_http_error(404)) as mock_urlopen,
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                client._request("GET", "/labels/x")
+
+        self.assertIn("HTTP 404", str(cm.exception))
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_get_retries_on_url_error_then_succeeds(self):
+        client = IssueClient("owner/repo", "token")
+        ok = FakeJsonResponse(b'{"ok": true}')
+
+        with (
+            patch(
+                "issues.urllib.request.urlopen",
+                side_effect=[urllib.error.URLError("boom"), ok],
+            ),
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            result = client._request("GET", "/issues")
+
+        self.assertEqual(result, {"ok": True})
+        mock_sleep.assert_called_once()
+
+    def test_get_retries_on_timeout_error_then_succeeds(self):
+        """urlopen raises a bare TimeoutError (not a URLError) on a read timeout."""
+        client = IssueClient("owner/repo", "token")
+        ok = FakeJsonResponse(b'{"ok": true}')
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=[TimeoutError(), ok]),
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            result = client._request("GET", "/issues")
+
+        self.assertEqual(result, {"ok": True})
+        mock_sleep.assert_called_once()
+
+    def test_post_is_not_retried_on_network_error(self):
+        """
+        The duplicate-issue guard: a POST may have already succeeded
+        server-side before a URLError/timeout was raised locally, so
+        retrying it risks filing a second issue.
+        """
+        for error in (urllib.error.URLError("boom"), TimeoutError()):
+            with self.subTest(error=type(error).__name__):
+                client = IssueClient("owner/repo", "token")
+
+                with (
+                    patch("issues.urllib.request.urlopen", side_effect=error) as mock_urlopen,
+                    patch("issues.time.sleep") as mock_sleep,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        client.create_issue("title", "body", ["label"])
+
+                self.assertEqual(mock_urlopen.call_count, 1)
+                mock_sleep.assert_not_called()
+
+    def test_post_is_not_retried_on_5xx(self):
+        """
+        A 502/504 from GitHub's front end, or a 500, can arrive after the
+        backend already saved the issue - same maybe-applied risk as a
+        network error.
+        """
+        client = IssueClient("owner/repo", "token")
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=_http_error(502)) as mock_urlopen,
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                client.create_issue("title", "body", ["label"])
+
+        self.assertIn("HTTP 502", str(cm.exception))
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_post_is_retried_on_rate_limit(self):
+        """GitHub rejects a rate-limited request before doing any work, so it's safe to resend."""
+        secondary_403 = _http_error(403, body=b"You have exceeded a secondary rate limit")
+        for error in (_http_error(429), secondary_403):
+            with self.subTest(code=error.code):
+                client = IssueClient("owner/repo", "token")
+                ok = FakeJsonResponse(b'{"number": 1, "html_url": "u1"}')
+
+                with (
+                    patch("issues.urllib.request.urlopen", side_effect=[error, ok]),
+                    patch("issues.time.sleep"),
+                ):
+                    result = client.create_issue("title", "body", ["label"])
+
+                self.assertEqual(result, {"number": 1, "html_url": "u1"})
+
+    def test_retry_after_header_is_honored_and_capped(self):
+        client = IssueClient("owner/repo", "token")
+        ok = FakeJsonResponse(b'{"ok": true}')
+        rate_limited = _http_error(429, headers={"Retry-After": "600"})
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=[rate_limited, ok]),
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            client._request("GET", "/issues")
+
+        mock_sleep.assert_called_once_with(60.0)
+
+    def test_retry_after_falls_back_to_backoff_when_not_a_plain_integer(self):
+        client = IssueClient("owner/repo", "token")
+        ok = FakeJsonResponse(b'{"ok": true}')
+        rate_limited = _http_error(429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=[rate_limited, ok]),
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            client._request("GET", "/issues")
+
+        mock_sleep.assert_called_once_with(2.0)
+
+    def test_retry_after_falls_back_to_backoff_when_negative_or_not_finite(self):
+        # time.sleep raises ValueError on a negative value, which would
+        # escape as an unexpected error instead of a RuntimeError.
+        for raw in ("-5", "nan", "inf"):
+            with self.subTest(retry_after=raw):
+                client = IssueClient("owner/repo", "token")
+                ok = FakeJsonResponse(b'{"ok": true}')
+                rate_limited = _http_error(429, headers={"Retry-After": raw})
+
+                with (
+                    patch("issues.urllib.request.urlopen", side_effect=[rate_limited, ok]),
+                    patch("issues.time.sleep") as mock_sleep,
+                ):
+                    client._request("GET", "/issues")
+
+                mock_sleep.assert_called_once_with(2.0)
+
+    def test_ensure_label_still_creates_on_404_without_sleeping(self):
+        client = IssueClient("owner/repo", "token")
+        created = FakeJsonResponse(b'{"name": "x"}')
+
+        with (
+            patch(
+                "issues.urllib.request.urlopen", side_effect=[_http_error(404), created]
+            ) as mock_urlopen,
+            patch("issues.time.sleep") as mock_sleep,
+        ):
+            client.ensure_label("x")
+
+        self.assertEqual(mock_urlopen.call_count, 2)  # GET 404, then POST create
+        mock_sleep.assert_not_called()
+
+    def test_exhausted_retries_raise_with_status_and_body(self):
+        client = IssueClient("owner/repo", "token")
+        # A fresh HTTPError per attempt: a real urlopen() call produces a
+        # new response (and a new, unconsumed .fp) each time, unlike
+        # reusing one exception instance across retries.
+        errors = [_http_error(503, body=b"down") for _ in range(3)]
+
+        with (
+            patch("issues.urllib.request.urlopen", side_effect=errors),
+            patch("issues.time.sleep"),
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                client._request("GET", "/issues")
+
+        self.assertIn("HTTP 503", str(cm.exception))
+        self.assertIn("down", str(cm.exception))
 
 
 class MarkerFilteringFakeClient:
