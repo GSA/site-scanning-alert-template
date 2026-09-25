@@ -149,7 +149,7 @@ class TestChangeDiff(unittest.TestCase):
 
 class TestIsRecovery(unittest.TestCase):
     """
-    _is_recovery is a whitelist, not a heuristic: only fields the action has
+    _is_recovery is an allowlist, not a heuristic: only fields the action has
     real direction knowledge for (live, status_code, primary_scan_status)
     can ever be recoveries. Anything else - including user-configured
     custom `fields` - is never suppressed, since the action has no basis

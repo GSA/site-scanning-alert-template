@@ -79,7 +79,7 @@ def _is_recovery(field: str, old: str, new: str) -> bool:
     Determine whether a field transition is a good-direction ("recovery")
     change.
 
-    This is a whitelist, not a heuristic: only the three fields the action
+    This is an allowlist, not a heuristic: only the three fields the action
     has real direction knowledge for can ever be a recovery. Any other
     field - including a user-configured custom `fields` entry like
     `https_enforced` or `hsts` - always returns False, since the action has
