@@ -123,7 +123,7 @@ The action is configured via inputs in `.github/workflows/site-scanning-alerts.y
 | `alert_on_not_live` | `true` | Alert when monitored sites have live=false (state mode). Defaults on - a fully unreachable site has a blank status_code and a primary_scan_status outside the empty-by-default alert_on_scan_status set, so without this a hard-down site produces no state findings at all. Costs one finding per non-live site on every run it stays down |
 | `ignore_blank_transitions` | `false` | Suppress alerts for value -> blank and blank -> value transitions. When false, renders blanks as "(no data)" |
 | `ignore_transitions` | *(see below)* | Comma-separated list of specific transitions to suppress, format: field:old_value->new_value. Default suppresses transient status flapping |
-| `report_recoveries` | `false` | Include good-direction transitions in alerts (`live`→true, `status_code`→2xx/3xx, `primary_scan_status`→completed). Default suppresses them — a recovery would otherwise file its own new issue rather than closing the original. Custom fields (`https_enforced`, `hsts`, …) are never treated as recoveries |
+| `report_recoveries` | `false` | Include good-direction transitions in alerts (`live`→true, `status_code`→2xx, `primary_scan_status`→completed). Default suppresses them — a recovery would otherwise file its own new issue rather than closing the original. Custom fields (`https_enforced`, `hsts`, …) are never treated as recoveries |
 | `max_changes` | `25` | Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines |
 | `labels` | `site-scanning-alert` | Comma-separated list of labels to apply to created issues |
 | `issue_title` | `Possible website issues` | Title for alert issues |

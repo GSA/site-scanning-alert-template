@@ -47,7 +47,7 @@ inputs:
     default: 'primary_scan_status:timeout->execution_context_destroyed,primary_scan_status:timeout->connection_reset,primary_scan_status:timeout->empty_response,primary_scan_status:execution_context_destroyed->timeout,primary_scan_status:connection_reset->timeout,primary_scan_status:empty_response->timeout,primary_scan_status:aborted->timeout,primary_scan_status:http2_error->timeout'
 
   report_recoveries:
-    description: 'Include good-direction transitions in alerts (live->true, status_code->2xx/3xx, primary_scan_status->completed). Default suppresses them, since a recovery files its own new issue rather than closing the original. Fields the action has no direction knowledge for (e.g. https_enforced, hsts) are never treated as recoveries and are always reported.'
+    description: 'Include good-direction transitions in alerts (live->true, status_code->2xx, primary_scan_status->completed). Default suppresses them, since a recovery files its own new issue rather than closing the original. Fields the action has no direction knowledge for (e.g. https_enforced, hsts) are never treated as recoveries and are always reported.'
     required: false
     default: 'false'
 

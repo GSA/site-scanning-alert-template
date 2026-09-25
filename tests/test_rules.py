@@ -167,8 +167,16 @@ class TestIsRecovery(unittest.TestCase):
 
     def test_status_code_becoming_healthy_is_a_recovery(self):
         self.assertTrue(_is_recovery("status_code", "503", "200"))
-        self.assertTrue(_is_recovery("status_code", "403", "301"))
+        self.assertTrue(_is_recovery("status_code", "403", "204"))
         self.assertTrue(_is_recovery("status_code", "", "200"))
+        self.assertTrue(_is_recovery("status_code", "302", "200"))
+
+    def test_status_code_becoming_a_redirect_is_not(self):
+        # A redirect is often an outage's maintenance page, so it can't
+        # confirm the site came back.
+        self.assertFalse(_is_recovery("status_code", "503", "302"))
+        self.assertFalse(_is_recovery("status_code", "403", "301"))
+        self.assertFalse(_is_recovery("status_code", "", "307"))
 
     def test_status_code_staying_unhealthy_is_not(self):
         self.assertFalse(_is_recovery("status_code", "500", "503"))

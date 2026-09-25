@@ -66,9 +66,12 @@ class Alert:
 
 
 def _is_healthy_status_code(value: str) -> bool:
-    """A 2xx or 3xx status_code value."""
+    """
+    A 2xx status_code value. 3xx is excluded: an outage often redirects to a
+    maintenance page, so a redirect can't confirm the site recovered.
+    """
     value = value.strip()
-    return len(value) == 3 and value.isdigit() and value[0] in ("2", "3")
+    return len(value) == 3 and value.isdigit() and value[0] == "2"
 
 
 def _is_recovery(field: str, old: str, new: str) -> bool:
