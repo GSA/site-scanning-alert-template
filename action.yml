@@ -45,7 +45,12 @@ inputs:
     description: 'Comma-separated list of specific transitions to suppress, format: field:old_value->new_value. Example: primary_scan_status:timeout->execution_context_destroyed,primary_scan_status:execution_context_destroyed->timeout'
     required: false
     default: 'primary_scan_status:timeout->execution_context_destroyed,primary_scan_status:timeout->connection_reset,primary_scan_status:timeout->empty_response,primary_scan_status:execution_context_destroyed->timeout,primary_scan_status:connection_reset->timeout,primary_scan_status:empty_response->timeout,primary_scan_status:aborted->timeout,primary_scan_status:http2_error->timeout'
-  
+
+  report_recoveries:
+    description: 'Include good-direction transitions in alerts (live->true, status_code->2xx, primary_scan_status->completed). Default suppresses them, since a recovery files its own new issue rather than closing the original. Fields the action has no direction knowledge for (e.g. https_enforced, hsts) are never treated as recoveries and are always reported.'
+    required: false
+    default: 'false'
+
   max_changes:
     description: 'Maximum number of changes to enumerate in an issue. When exceeded, issue shows summary counts instead of individual lines. Must be a whole number >= 1.'
     required: false
@@ -107,6 +112,7 @@ runs:
         INPUT_ALERT_ON_NOT_LIVE: ${{ inputs.alert_on_not_live }}
         INPUT_IGNORE_BLANK_TRANSITIONS: ${{ inputs.ignore_blank_transitions }}
         INPUT_IGNORE_TRANSITIONS: ${{ inputs.ignore_transitions }}
+        INPUT_REPORT_RECOVERIES: ${{ inputs.report_recoveries }}
         INPUT_MAX_CHANGES: ${{ inputs.max_changes }}
         INPUT_LABELS: ${{ inputs.labels }}
         INPUT_ISSUE_TITLE: ${{ inputs.issue_title }}

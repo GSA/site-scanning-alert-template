@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from rules import (
     Alert,
+    _is_recovery,
     dedupe_alerts,
     evaluate_change_diff,
     evaluate_state_check,
@@ -88,6 +89,110 @@ class TestChangeDiff(unittest.TestCase):
 
         self.assertEqual(len(alerts), 1)
         self.assertIn("no longer in snapshot", alerts[0].new_value)
+
+    def test_recovery_is_suppressed_when_report_recoveries_false(self):
+        latest = [{"initial_domain": "test.gov", "primary_scan_status": "completed"}]
+        previous = [{"initial_domain": "test.gov", "primary_scan_status": "timeout"}]
+
+        alerts = evaluate_change_diff(
+            latest, previous, ["primary_scan_status"], report_recoveries=False
+        )
+
+        self.assertEqual(len(alerts), 0)
+
+    def test_recovery_is_reported_when_report_recoveries_true(self):
+        latest = [{"initial_domain": "test.gov", "primary_scan_status": "completed"}]
+        previous = [{"initial_domain": "test.gov", "primary_scan_status": "timeout"}]
+
+        alerts = evaluate_change_diff(
+            latest, previous, ["primary_scan_status"], report_recoveries=True
+        )
+
+        self.assertEqual(len(alerts), 1)
+
+    def test_bad_direction_change_is_reported_either_way(self):
+        latest = [{"initial_domain": "test.gov", "status_code": "503"}]
+        previous = [{"initial_domain": "test.gov", "status_code": "200"}]
+
+        for report_recoveries in (True, False):
+            with self.subTest(report_recoveries=report_recoveries):
+                alerts = evaluate_change_diff(
+                    latest, previous, ["status_code"], report_recoveries=report_recoveries
+                )
+                self.assertEqual(len(alerts), 1)
+
+    def test_custom_field_good_direction_is_reported_either_way(self):
+        """
+        The action has no direction knowledge for a user-configured custom
+        field, so a good-looking transition on one is never treated as a
+        recovery - it's reported regardless of report_recoveries.
+        """
+        latest = [{"initial_domain": "test.gov", "https_enforced": "true"}]
+        previous = [{"initial_domain": "test.gov", "https_enforced": "false"}]
+
+        for report_recoveries in (True, False):
+            with self.subTest(report_recoveries=report_recoveries):
+                alerts = evaluate_change_diff(
+                    latest, previous, ["https_enforced"], report_recoveries=report_recoveries
+                )
+                self.assertEqual(len(alerts), 1)
+
+    def test_corpus_alerts_are_unaffected_by_report_recoveries(self):
+        latest = [{"initial_domain": "new.gov"}]
+        previous = []
+
+        alerts = evaluate_change_diff(latest, previous, [], report_recoveries=False)
+
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("newly in snapshot", alerts[0].new_value)
+
+
+class TestIsRecovery(unittest.TestCase):
+    """
+    _is_recovery is an allowlist, not a heuristic: only fields the action has
+    real direction knowledge for (live, status_code, primary_scan_status)
+    can ever be recoveries. Anything else - including user-configured
+    custom `fields` - is never suppressed, since the action has no basis
+    for judging its direction.
+    """
+
+    def test_live_becoming_true_is_a_recovery(self):
+        self.assertTrue(_is_recovery("live", "false", "true"))
+        self.assertTrue(_is_recovery("live", "", "true"))
+        self.assertTrue(_is_recovery("live", "FALSE", "TRUE"))
+
+    def test_live_becoming_false_is_not(self):
+        self.assertFalse(_is_recovery("live", "true", "false"))
+        self.assertFalse(_is_recovery("live", "true", ""))
+
+    def test_status_code_becoming_healthy_is_a_recovery(self):
+        self.assertTrue(_is_recovery("status_code", "503", "200"))
+        self.assertTrue(_is_recovery("status_code", "403", "204"))
+        self.assertTrue(_is_recovery("status_code", "", "200"))
+        self.assertTrue(_is_recovery("status_code", "302", "200"))
+
+    def test_status_code_becoming_a_redirect_is_not(self):
+        # A redirect is often an outage's maintenance page, so it can't
+        # confirm the site came back.
+        self.assertFalse(_is_recovery("status_code", "503", "302"))
+        self.assertFalse(_is_recovery("status_code", "403", "301"))
+        self.assertFalse(_is_recovery("status_code", "", "307"))
+
+    def test_status_code_staying_unhealthy_is_not(self):
+        self.assertFalse(_is_recovery("status_code", "500", "503"))
+        self.assertFalse(_is_recovery("status_code", "200", ""))
+        self.assertFalse(_is_recovery("status_code", "200", "403"))
+
+    def test_scan_status_becoming_completed_is_a_recovery(self):
+        self.assertTrue(_is_recovery("primary_scan_status", "timeout", "completed"))
+        self.assertTrue(_is_recovery("primary_scan_status", "", "completed"))
+
+    def test_scan_status_leaving_completed_is_not(self):
+        self.assertFalse(_is_recovery("primary_scan_status", "completed", "timeout"))
+
+    def test_unknown_field_is_never_a_recovery(self):
+        self.assertFalse(_is_recovery("https_enforced", "false", "true"))
+        self.assertFalse(_is_recovery("hsts", "", "true"))
 
 
 class TestStateCheck(unittest.TestCase):

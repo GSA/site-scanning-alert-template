@@ -61,6 +61,7 @@ class Config(NamedTuple):
     alert_on_not_live: bool
     ignore_blank_transitions: bool
     ignore_transitions_str: str
+    report_recoveries: bool
     max_changes: int
     labels: List[str]
     issue_title: str
@@ -149,6 +150,7 @@ def read_config() -> Config:
         alert_on_not_live=_env_flag("alert_on_not_live", "true"),
         ignore_blank_transitions=_env_flag("ignore_blank_transitions"),
         ignore_transitions_str=_env("ignore_transitions"),
+        report_recoveries=_env_flag("report_recoveries", "false"),
         max_changes=_env_int("max_changes", "25", minimum=1),
         labels=parse_csv_list(_env("labels", "site-scanning-alert")),
         issue_title=_env("issue_title", "Possible website issues"),
@@ -318,6 +320,7 @@ def _evaluate_changes(
         effective_fields,
         config.ignore_blank_transitions,
         parse_ignore_transitions(config.ignore_transitions_str),
+        config.report_recoveries,
     )
     print(f"Found {len(change_alerts)} change alerts")
     return change_alerts, False
