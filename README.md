@@ -1,6 +1,6 @@
 # Site Scanning Alerts
 
-Monitor federal websites for status changes and configuration issues using [GSA Site Scanning](https://digital.gov/site-scanning/) data. Automatically creates GitHub issues when your monitored websites experience problems.
+Monitor federal websites for status changes and configuration issues using [GSA Site Scanning](https://digital.gov/site-scanning/) data. Automatically creates GitHub issues when your monitored websites experience problems.  Inspired by the outstanding work and leadership of the NOAA Web Committee and the Digital Engagement and Transformation team.  
 
 This repo monitors the sites listed in `watchlist.txt` and checks for changes or problems daily.
 
