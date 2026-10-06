@@ -42,7 +42,7 @@ This repo monitors the sites listed in `watchlist.txt` and checks for changes or
        timeout-minutes: 30
        steps:
          - uses: actions/checkout@v4
-         - uses: GSA/site-scanning-alert-template@v1
+         - uses: GSA/site-scanning-alert-template@074726f1752f67ada031c1e5bb39ef827198a68f # v1.0.0
            with:
              watchlist: watchlist.txt
    ```
@@ -352,13 +352,16 @@ cat /tmp/summary.md
 
 ### Releasing
 
-**First release only:** `.github/workflows/site-scanning-alerts.yml` and this README's quickstart both reference `GSA/site-scanning-alert-template@v1`. That tag does not exist until someone creates it — consumer workflows will fail to resolve the action until the initial `v1` tag is pushed.
+Consumers (including this repo's own `.github/workflows/site-scanning-alerts.yml`) pin to a **full commit SHA**, not a floating tag — the same supply-chain-security convention this file already uses for `actions/checkout@<sha> # v4.2.2`. A SHA pin is immutable and immune to tag-hijacking; it also means there's no release-tag bootstrap step a consumer workflow depends on.
 
 1. Merge PR to `main`
-2. Tag the release: `git tag v1.x.x && git push origin v1.x.x`
-3. Move the `v1` tag: `git tag -f v1 && git push -f origin v1` (on the first release, this creates `v1`; on subsequent releases, it moves it)
+2. Get the merge commit's full SHA: `git rev-parse HEAD`
+3. Update every reference to the action with `GSA/site-scanning-alert-template@<full-sha> # <human-readable version, e.g. v1.1.0>`:
+   - `.github/workflows/site-scanning-alerts.yml`
+   - This README's quickstart block
+4. (Optional, for a human-readable marker in `git log`/GitHub's releases UI) Tag the commit: `git tag v1.x.x <sha> && git push origin v1.x.x` — this is documentation only; nothing resolves the action by this tag.
 
-Consumers reference `GSA/site-scanning-alert-template@v1` and get the latest v1.x automatically.
+Consumers update the pinned SHA (and trailing version comment) deliberately on each upgrade rather than floating automatically — this is intentional: it forces a visible diff and review on every version bump instead of silently picking up upstream changes.
 
 ### Known Limitations
 
